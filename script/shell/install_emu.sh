@@ -30,12 +30,13 @@ EOF
 
 # 安装redroid
 install_redroid() {
+  docker pull darknightlab/redroid-14-gms
   if ! docker ps -a --format '{{.Names}}' | grep -q "$REDROID_CONTAINER"; then
     docker run -itd --privileged \
-      -p "$REDROID_PORT:$REDROID_PORT" \
-      --name "$REDROID_CONTAINER" \
+      -p "6666:6666" \
+      --name "redroid_gms" \
       --restart=unless-stopped \
-      redroid/redroid:11.0.0-latest
+      darknightlab/redroid-14-gms
   else
     echo "$REDROID_CONTAINER 已安装"
     docker start "$REDROID_CONTAINER"
@@ -176,6 +177,9 @@ configure_gapps_to_emu() {
   docker exec "$REDROID_CONTAINER" pm grant com.google.android.gms android.permission.ACCESS_FINE_LOCATION
   docker exec "$REDROID_CONTAINER" pm grant com.google.android.setupwizard android.permission.READ_PHONE_STATE
   docker exec "$REDROID_CONTAINER" pm grant com.google.android.setupwizard android.permission.READ_CONTACTS
+
+
+  
   docker restart "$REDROID_CONTAINER"
   rm -rf gapps
 }

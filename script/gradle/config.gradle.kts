@@ -121,7 +121,7 @@ private object FileMappingHelper {
             // 检查符号链接是否指向正确的源
             val current = Files.readSymbolicLink(target)
             if (current != source) {
-                println("Updating symlink: $target → $source")
+                println("Updating symlink: $source → $target")
                 Files.delete(target)  // 删除现有符号链接
                 Files.createSymbolicLink(target, source)  // 创建新的符号链接
             } else {
@@ -134,7 +134,7 @@ private object FileMappingHelper {
             Files.deleteIfExists(target)
             // 创建符号链接
             Files.createSymbolicLink(target, source)
-            println("Created symlink: $target → $source")
+            println("Created symlink: $source → $target")
         }
     }
 }

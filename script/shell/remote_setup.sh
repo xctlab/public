@@ -28,7 +28,7 @@ run_script() {
     fi
 }
 
-prefix_url="https://raw.githubusercontent.com/xcorga/public/refs/heads/main/script/shell/"
+prefix_url="https://raw.githubusercontent.com/xctlab/public/refs/heads/main/script/shell/"
 
 if [ -z "$1" ]; then
     print_menu
