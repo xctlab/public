@@ -30,11 +30,10 @@ EOF
 
 # 安装redroid
 install_redroid() {
-  docker pull darknightlab/redroid-14-gms
   if ! docker ps -a --format '{{.Names}}' | grep -q "$REDROID_CONTAINER"; then
     docker run -itd --privileged \
-      -p "5555:5555" \
-      --name "redroid" \
+      -p "$REDROID_PORT:$REDROID_PORT" \
+      --name "$REDROID_CONTAINER" \
       --restart=unless-stopped \
       darknightlab/redroid-14-gms
   else
@@ -139,19 +138,8 @@ EOF
   sudo systemctl start adb_connect_docker.service
 }
 
-configure_gapps_to_emu() {
-  cd /tmp
-  if [ -d "gapps" ] && [ "$(ls -A gapps)" ]; then
-    echo "gapps 目录已存在且非空，不需要重新下载解压。"
-  else
-    echo "开始下载 gapps.zip ..."
-    curl -L -o gapps.zip https://github.com/hhoy/redroid/releases/download/v1.0.0/gapps.zip
-    echo "下载完成，开始解压..."
-    unzip -q gapps.zip -d gapps
-    echo "解压完成。"
-  fi
-
-  # 伪装机型
+# 模拟器伪装机型
+disguise_emu_device() {
   local -A PROPS=(
     [ro.product.model]="Pixel 5"
     [ro.product.brand]="google"
@@ -170,6 +158,22 @@ configure_gapps_to_emu() {
       fi
     "
   done
+}
+
+configure_gapps_to_emu() {
+  cd /tmp
+  if [ -d "gapps" ] && [ "$(ls -A gapps)" ]; then
+    echo "gapps 目录已存在且非空，不需要重新下载解压。"
+  else
+    echo "开始下载 gapps.zip ..."
+    curl -L -o gapps.zip https://github.com/hhoy/redroid/releases/download/v1.0.0/gapps.zip
+    echo "下载完成，开始解压..."
+    unzip -q gapps.zip -d gapps
+    echo "解压完成。"
+  fi
+
+  # 伪装机型
+  disguise_emu_device
 
   docker exec "$REDROID_CONTAINER" rm -rf /system/priv-app/PackageInstaller
   docker cp gapps/. "$REDROID_CONTAINER:/"
