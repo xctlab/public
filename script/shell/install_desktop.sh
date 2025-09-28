@@ -2,6 +2,11 @@
 
 set -e
 
+# 获取当前登录会话的原始用户名
+REAL_USER=$(logname)
+# 安全解析该用户的 home 目录
+USER_HOME=$(eval echo "~$REAL_USER")
+
 echo "🔄 更新系统..."
 sudo apt update && sudo apt upgrade -y
 
@@ -15,7 +20,7 @@ sudo systemctl start xrdp
 
 echo "🛠️ 配置 xrdp 使用 Xfce..."
 # xrdp 登录时使用 startxfce4 启动 XFCE 桌面环境
-echo "startxfce4" > ~/.xsession
+echo "startxfce4" > "$USER_HOME/.xsession"
 # /etc/skel/ 是系统在创建新用户时默认复制配置文件的地方
 sudo cp ~/.xsession /etc/skel/.xsession
 
