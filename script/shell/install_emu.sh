@@ -34,7 +34,7 @@ install_redroid() {
   if ! docker ps -a --format '{{.Names}}' | grep -q "$REDROID_CONTAINER"; then
     docker run -itd --privileged \
       -p "6666:6666" \
-      --name "redroid_gms" \
+      --name "redroid" \
       --restart=unless-stopped \
       darknightlab/redroid-14-gms
   else
