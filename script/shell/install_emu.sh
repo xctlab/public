@@ -33,7 +33,7 @@ install_redroid() {
   docker pull darknightlab/redroid-14-gms
   if ! docker ps -a --format '{{.Names}}' | grep -q "$REDROID_CONTAINER"; then
     docker run -itd --privileged \
-      -p "6666:6666" \
+      -p "5555:5555" \
       --name "redroid" \
       --restart=unless-stopped \
       darknightlab/redroid-14-gms
@@ -191,8 +191,9 @@ install_ws_scrcpy
 configure_ws_scrcpy_auto_connect
 echo "redroid安卓模拟器部署完成"
 
-echo "🛠️ 开始配置OpenGApps到模拟器"
-configure_gapps_to_emu
+# 这里用redroid-14-gms来部署模拟器，就不用自己添加gapps了
+# echo "🛠️ 开始配置OpenGApps到模拟器"
+# configure_gapps_to_emu
 
 serverIp=$(curl -s ifconfig.me)
 echo "浏览器打开'$serverIp:8000'查看设备列表"
