@@ -56,23 +56,20 @@ SDK_ZIP_URL=$(get_latest_cmd_tools_url)
 
 # 判断是否已经安装了commandline tools
 if [ ! -d "$TOOLS_DIR/$TOOL_VERSION" ]; then
-  # 在用户目录下安装
-  sudo -u $REAL_USER $SHELL <<EOF
-echo "📁 Step 2: 准备 SDK 安装目录：$TOOLS_DIR/$TOOL_VERSION"
-mkdir -p "$TOOLS_DIR"
-cd "$TOOLS_DIR"
-echo "🌐 Step 3: 下载 Android commandline tools..."
-wget -O sdk-tools.zip "$SDK_ZIP_URL"
+  echo "📁 Step 2: 准备 SDK 安装目录：$TOOLS_DIR/$TOOL_VERSION"
+  mkdir -p "$TOOLS_DIR"
+  cd "$TOOLS_DIR"
+  echo "🌐 Step 3: 下载 Android commandline tools..."
+  wget -O sdk-tools.zip "$SDK_ZIP_URL"
 
-echo "📦 Step 4: 解压工具包..."
-unzip sdk-tools.zip
-rm sdk-tools.zip
+  echo "📦 Step 4: 解压工具包..."
+  unzip sdk-tools.zip
+  rm sdk-tools.zip
 
-echo "🔄 Step 5: 重命名目录为 $TOOL_VERSION（供 sdkmanager 识别）"
-mv cmdline-tools "$TOOL_VERSION"
+  echo "🔄 Step 5: 重命名目录为 $TOOL_VERSION（供 sdkmanager 识别）"
+  mv cmdline-tools "$TOOL_VERSION"
 
-echo "✅ 工具下载与解压完成。"
-EOF
+  echo "✅ 工具下载与解压完成。"
 else
   echo "⚠️ cmdline-tools已安装，跳过。"
 fi
@@ -107,6 +104,7 @@ export ANDROID_SDK_ROOT="$USER_HOME/Android/Sdk"
 export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
 export PATH="$ANDROID_SDK_ROOT/platform-tools:$PATH"
 export PATH="$ANDROID_SDK_ROOT/emulator:$PATH"
+
 
 echo "📄 Step 7: 接受 SDK License 条款..."
 yes | sdkmanager --licenses

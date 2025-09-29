@@ -17,7 +17,7 @@ install_docker() {
 # 安装binder_linux模块
 install_binder_linux() {
   # 安装内核模块扩展包
-  apt install -y linux-modules-extra-`uname -r`
+  sudo apt install -y linux-modules-extra-`uname -r`
   # 加载binder_linux模块
   modprobe binder_linux devices="binder,hwbinder,vndbinder"
 
@@ -30,23 +30,23 @@ EOF
 
 # 安装redroid
 install_redroid() {
-  if ! docker ps -a --format '{{.Names}}' | grep -q "$REDROID_CONTAINER"; then
-    docker run -itd --privileged \
+  if ! sudo docker ps -a --format '{{.Names}}' | grep -q "$REDROID_CONTAINER"; then
+    sudo docker run -itd --privileged \
       -p "$REDROID_PORT:$REDROID_PORT" \
       --name "$REDROID_CONTAINER" \
       --restart=unless-stopped \
       darknightlab/redroid-14-gms
   else
     echo "$REDROID_CONTAINER 已安装"
-    docker start "$REDROID_CONTAINER"
+    sudo docker start "$REDROID_CONTAINER"
   fi
 }
 
 # 安装ws-scrcpy
 install_ws_scrcpy() {
-  if ! docker ps -a --format '{{.Names}}' | grep -q "$WS_SCRCPY_CONTAINER"; then
+  if ! sudo docker ps -a --format '{{.Names}}' | grep -q "$WS_SCRCPY_CONTAINER"; then
     # 手动打包ws-scrcpy镜像，docker仓库里面的太老了
-    docker build -t ws-scrcpy - << EOF
+    sudo docker build -t ws-scrcpy - << EOF
 FROM node:18
 MAINTAINER Scavin <scavin@appinn.com>
 
@@ -64,10 +64,10 @@ EXPOSE 8000
 CMD ["node","dist/index.js"]
 EOF
     # 启动ws-scrcpy容器
-    docker run --name "$WS_SCRCPY_CONTAINER" --restart=unless-stopped -d -p 8000:8000 ws-scrcpy
+    sudo docker run --name "$WS_SCRCPY_CONTAINER" --restart=unless-stopped -d -p 8000:8000 ws-scrcpy
   else
     echo "$WS_SCRCPY_CONTAINER 已安装"
-    docker start "$WS_SCRCPY_CONTAINER"
+    sudo docker start "$WS_SCRCPY_CONTAINER"
   fi
 }
 
@@ -150,7 +150,7 @@ disguise_emu_device() {
     val="${PROPS[$key]}"
     echo "🔧 设置 $key = $val"
 
-    docker exec "$REDROID_CONTAINER" sh -c "
+    sudo docker exec "$REDROID_CONTAINER" sh -c "
       if grep -q '^$key=' /system/build.prop; then
         sed -i 's|^$key=.*|$key=$val|' /system/build.prop
       else
@@ -175,16 +175,14 @@ configure_gapps_to_emu() {
   # 伪装机型
   disguise_emu_device
 
-  docker exec "$REDROID_CONTAINER" rm -rf /system/priv-app/PackageInstaller
-  docker cp gapps/. "$REDROID_CONTAINER:/"
-  docker exec "$REDROID_CONTAINER" pm grant com.google.android.gms android.permission.ACCESS_COARSE_LOCATION
-  docker exec "$REDROID_CONTAINER" pm grant com.google.android.gms android.permission.ACCESS_FINE_LOCATION
-  docker exec "$REDROID_CONTAINER" pm grant com.google.android.setupwizard android.permission.READ_PHONE_STATE
-  docker exec "$REDROID_CONTAINER" pm grant com.google.android.setupwizard android.permission.READ_CONTACTS
-
-
+  sudo docker exec "$REDROID_CONTAINER" rm -rf /system/priv-app/PackageInstaller
+  sudo docker cp gapps/. "$REDROID_CONTAINER:/"
+  sudo docker exec "$REDROID_CONTAINER" pm grant com.google.android.gms android.permission.ACCESS_COARSE_LOCATION
+  sudo docker exec "$REDROID_CONTAINER" pm grant com.google.android.gms android.permission.ACCESS_FINE_LOCATION
+  sudo docker exec "$REDROID_CONTAINER" pm grant com.google.android.setupwizard android.permission.READ_PHONE_STATE
+  sudo docker exec "$REDROID_CONTAINER" pm grant com.google.android.setupwizard android.permission.READ_CONTACTS
   
-  docker restart "$REDROID_CONTAINER"
+  sudo docker restart "$REDROID_CONTAINER"
   rm -rf gapps
 }
 

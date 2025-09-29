@@ -22,7 +22,7 @@ run_script() {
         script_name="${script_info%%:*}"
         script_file="${script_info#*:}"
         echo "执行脚本: $script_name"
-        curl -fsSL "${prefix_url}${script_file}" | sudo bash -s --
+        curl -fsSL "${prefix_url}${script_file}" | bash -s --
     else
         echo "无效序号：'$idx'"
     fi
