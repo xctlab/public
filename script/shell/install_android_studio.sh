@@ -52,12 +52,14 @@ Version=1.0
 Type=Application
 Name=Android Studio
 Icon=/opt/android-studio/bin/studio.png
-Exec=/opt/android-studio/bin/studio
+Exec=bash -lc '/opt/android-studio/bin/studio'
 Comment=The official IDE for Android development
 Categories=Development;IDE;
 Terminal=false
 StartupNotify=true
 EOF
+
+bash -lc "/opt/android-studio/bin/studio"
 
 chmod +x "$DESKTOP_FILE"
 
