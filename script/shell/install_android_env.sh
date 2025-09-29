@@ -19,9 +19,32 @@ get_latest_cmd_tools_url() {
   echo "$url"
 }
 
+function check_add_bash_env() {
+  # 检查 .bashrc 有没有 source ~/.bash_env
+  if ! grep -q "source ~/.bash_env" "$HOME/.bashrc"; then
+    cat >> "$HOME/.bashrc" <<EOF
+
+# include .bash_env if it exists
+if [ -f ~/.bash_env ]; then
+  source ~/.bash_env
+fi
+EOF
+  fi
+  # 检查 .bash_profile 有没有 source ~/.bash_env
+  if ! grep -q "source ~/.bash_env" "$HOME/.bash_profile"; then
+    cat >> "$HOME/.bashrc" <<EOF
+
+# include .bash_env if it exists
+if [ -f ~/.bash_env ]; then
+  source ~/.bash_env
+fi
+EOF
+  fi
+}
+
 echo "📦 Step 1: 安装必要依赖..."
 sudo apt update
-sudo apt install -y wget unzip curl
+sudo apt install -y wget unzip zip curl
 
 echo "✅ 依赖安装完成。"
 
@@ -56,7 +79,8 @@ fi
 
 # 添加环境变量到 shell 配置
 echo "🔧 Step 6: 配置环境变量..."
-ENV_CONFIG_FILE="$USER_HOME/.bashrc"
+check_add_bash_env
+ENV_CONFIG_FILE="$USER_HOME/.bash_env"
 if ! grep -q ANDROID_SDK_ROOT "$ENV_CONFIG_FILE"; then
   cat <<'EOF' >> "$ENV_CONFIG_FILE"
 
