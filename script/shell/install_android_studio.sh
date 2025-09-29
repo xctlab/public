@@ -59,8 +59,6 @@ Terminal=false
 StartupNotify=true
 EOF
 
-bash -lc "/opt/android-studio/bin/studio"
-
 chmod +x "$DESKTOP_FILE"
 
 mkdir -p ~/Desktop
