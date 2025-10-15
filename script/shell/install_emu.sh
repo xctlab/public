@@ -19,7 +19,7 @@ install_binder_linux() {
   # 安装内核模块扩展包
   sudo apt install -y linux-modules-extra-`uname -r`
   # 加载binder_linux模块
-  modprobe binder_linux devices="binder,hwbinder,vndbinder"
+  sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
 
   # 开机自动加载 binder_linux 模块
   echo "binder_linux" | sudo tee /etc/modules-load.d/binder_linux.conf
@@ -28,14 +28,14 @@ options binder_linux devices="binder,hwbinder,vndbinder"
 EOF
 }
 
-# 安装redroid
+# 安装redroid https://github.com/ERSTT/redroid/blob/main/README_CN.md
 install_redroid() {
   if ! sudo docker ps -a --format '{{.Names}}' | grep -q "$REDROID_CONTAINER"; then
     sudo docker run -itd --privileged \
       -p "$REDROID_PORT:$REDROID_PORT" \
       --name "$REDROID_CONTAINER" \
       --restart=unless-stopped \
-      darknightlab/redroid-14-gms
+      erstt/redroid:15.0.0_ndk_magisk_litegapps_AVD
   else
     echo "$REDROID_CONTAINER 已安装"
     sudo docker start "$REDROID_CONTAINER"
