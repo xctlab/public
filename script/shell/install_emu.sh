@@ -74,7 +74,7 @@ EOF
 # 配置ws-scrcpy自动连接模拟器
 configure_ws_scrcpy_auto_connect() {
   # 写入脚本，监听端口可用时ws-scrcpy自动连接adb
-  cat << 'EOF' > /usr/local/bin/adb_connect_docker.sh
+  sudo tee /usr/local/bin/adb_connect_docker.sh << 'EOF'
 #!/bin/bash
 
 CONTAINER_NAME="redroid"
@@ -118,7 +118,7 @@ EOF
   sudo chmod +x /usr/local/bin/adb_connect_docker.sh
 
   # 创建 systemd 服务文件
-  cat << 'EOF' > /etc/systemd/system/adb_connect_docker.service
+  sudo tee /etc/systemd/system/adb_connect_docker.service << 'EOF'
 [Unit]
 Description=等待Docker容器启动并让ws-scrcpy自动连接adb设备
 After=docker.service
