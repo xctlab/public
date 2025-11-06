@@ -10,21 +10,25 @@ USER_HOME=$(eval echo "~$REAL_USER")
 echo "🔄 更新系统..."
 sudo apt update && sudo apt upgrade -y
 
+# 安装 Google Noto 中日韩字体包（CJK: Chinese, Japanese, Korean）
+sudo apt install -y fonts-noto-cjk
+
 echo "📦 安装 Xfce 桌面环境..."
-sudo apt install -y xfce4
-# 保留屏保
-xfconf-query -c xfce4-screensaver -p /saver/enabled -s true -t bool -n || true
-# 禁用锁屏密码
-xfconf-query -c xfce4-screensaver -p /lock/enabled -s false -t bool -n 2>/dev/null || true
-# 禁用 colord 密码弹窗
-sudo tee /etc/polkit-1/localauthority/50-local.d/colord.pkla > /dev/null <<EOF
-[Allow colord without password]
-Identity=unix-user:$(logname)
-Action=org.freedesktop.color-manager.*
-ResultAny=yes
-ResultInactive=yes
-ResultActive=yes
-EOF
+sudo apt install -y --no-install-recommends xfce4
+sudo apt install -y elementary-xfce-icon-theme greybird-gtk-theme
+# # 保留屏保
+# xfconf-query -c xfce4-screensaver -p /saver/enabled -s true -t bool -n || true
+# # 禁用锁屏密码
+# xfconf-query -c xfce4-screensaver -p /lock/enabled -s false -t bool -n 2>/dev/null || true
+# # 禁用 colord 密码弹窗
+# sudo tee /etc/polkit-1/localauthority/50-local.d/colord.pkla > /dev/null <<EOF
+# [Allow colord without password]
+# Identity=unix-user:$(logname)
+# Action=org.freedesktop.color-manager.*
+# ResultAny=yes
+# ResultInactive=yes
+# ResultActive=yes
+# EOF
 
 echo "🖥️ 安装 xrdp 远程桌面服务..."
 sudo apt install -y xrdp
