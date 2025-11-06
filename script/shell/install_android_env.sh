@@ -89,17 +89,17 @@ fi
 
 # 配置同步到 ~/.bashrc,
 BASHRC_FILE="$USER_HOME/.bashrc"
-if ! grep -q ".user_env" "$PROFILE_FILE"; then
-  cat <<'EOF' >> "$PROFILE_FILE"
+if ! grep -q ".user_env" "$BASHRC_FILE"; then
+  cat <<'EOF' >> "$BASHRC_FILE"
 
 # include .user_env if it exists
 if [ -f "$HOME/.user_env" ]; then
   . "$HOME/.user_env"
 fi
 EOF
-  echo "✅ 已同步到 $PROFILE_FILE。"
+  echo "✅ 已同步到 $BASHRC_FILE"
 else
-  echo "⚠️ 检测到 $PROFILE_FILE 已配置 ，未重复添加。"
+  echo "⚠️ 检测到 $BASHRC_FILE 已配置 ，未重复添加。"
 fi
 
 # 生效当前终端

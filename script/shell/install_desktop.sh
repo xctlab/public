@@ -12,6 +12,8 @@ sudo apt update && sudo apt upgrade -y
 
 echo "📦 安装 Xfce 桌面环境..."
 sudo apt install -y xfce4
+# 保留屏保
+xfconf-query -c xfce4-screensaver -p /saver/enabled -s true -t bool -n || true
 # 禁用锁屏密码
 xfconf-query -c xfce4-screensaver -p /lock/enabled -s false -t bool -n 2>/dev/null || true
 # 禁用 colord 密码弹窗
