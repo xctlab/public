@@ -35,7 +35,7 @@ install_redroid() {
       -p "$REDROID_PORT:$REDROID_PORT" \
       --name "$REDROID_CONTAINER" \
       --restart=unless-stopped \
-      erstt/redroid:15.0.0_ndk_magisk_litegapps_AVD
+      kylindemons/redroid:15.0.0_amd64-GApps-latest
   else
     echo "$REDROID_CONTAINER 已安装"
     sudo docker start "$REDROID_CONTAINER"
