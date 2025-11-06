@@ -19,29 +19,6 @@ get_latest_cmd_tools_url() {
   echo "$url"
 }
 
-function check_add_bash_env() {
-  # 检查 .bashrc 有没有 source ~/.bash_env
-  if ! grep -q "source ~/.bash_env" "$HOME/.bashrc"; then
-    cat >> "$HOME/.bashrc" <<EOF
-
-# include .bash_env if it exists
-if [ -f ~/.bash_env ]; then
-  source ~/.bash_env
-fi
-EOF
-  fi
-  # 检查 .bash_profile 有没有 source ~/.bash_env
-  if ! grep -q "source ~/.bash_env" "$HOME/.bash_profile"; then
-    cat >> "$HOME/.bashrc" <<EOF
-
-# include .bash_env if it exists
-if [ -f ~/.bash_env ]; then
-  source ~/.bash_env
-fi
-EOF
-  fi
-}
-
 echo "📦 Step 1: 安装必要依赖..."
 sudo apt update
 sudo apt install -y wget unzip zip curl
@@ -74,10 +51,9 @@ else
   echo "⚠️ cmdline-tools已安装，跳过。"
 fi
 
-# 添加环境变量到 shell 配置
+# 添加环境变量到 ~/.bashrc 配置
 echo "🔧 Step 6: 配置环境变量..."
-check_add_bash_env
-ENV_CONFIG_FILE="$USER_HOME/.bash_env"
+ENV_CONFIG_FILE="$USER_HOME/.user_env"
 if ! grep -q ANDROID_SDK_ROOT "$ENV_CONFIG_FILE"; then
   cat <<'EOF' >> "$ENV_CONFIG_FILE"
 
@@ -91,9 +67,39 @@ export PATH=$ANDROID_SDK_ROOT/platform-tools:$PATH
 export PATH=$ANDROID_SDK_ROOT/emulator:$PATH
 # <<< Android SDK 设置 <<<
 EOF
-  echo "✅ 已添加到 $ENV_CONFIG_FILE。请运行 source $ENV_CONFIG_FILE 或重新打开终端以生效。"
+  echo "✅ 已添加到 $ENV_CONFIG_FILE。"
 else
-  echo "⚠️ 已检测到 SDK 环境变量配置，未重复添加。"
+  echo "⚠️ 已检测到 $ENV_CONFIG_FILE 存在 SDK 环境变量配置，未重复添加。"
+fi
+
+# 配置同步到 ~/.profile,
+PROFILE_FILE="$USER_HOME/.profile"
+if ! grep -q ".user_env" "$PROFILE_FILE"; then
+  cat <<'EOF' >> "$PROFILE_FILE"
+
+# include .user_env if it exists
+if [ -f "$HOME/.user_env" ]; then
+  . "$HOME/.user_env"
+fi
+EOF
+  echo "✅ 已同步到 $PROFILE_FILE。"
+else
+  echo "⚠️ 检测到 $PROFILE_FILE 已配置 ，未重复添加。"
+fi
+
+# 配置同步到 ~/.bashrc,
+BASHRC_FILE="$USER_HOME/.bashrc"
+if ! grep -q ".user_env" "$PROFILE_FILE"; then
+  cat <<'EOF' >> "$PROFILE_FILE"
+
+# include .user_env if it exists
+if [ -f "$HOME/.user_env" ]; then
+  . "$HOME/.user_env"
+fi
+EOF
+  echo "✅ 已同步到 $PROFILE_FILE。"
+else
+  echo "⚠️ 检测到 $PROFILE_FILE 已配置 ，未重复添加。"
 fi
 
 # 生效当前终端

@@ -11,7 +11,18 @@ echo "🔄 更新系统..."
 sudo apt update && sudo apt upgrade -y
 
 echo "📦 安装 Xfce 桌面环境..."
-sudo apt install -y xfce4 xfce4-goodies
+sudo apt install -y xfce4
+# 禁用锁屏密码
+xfconf-query -c xfce4-screensaver -p /lock/enabled -s false -t bool -n 2>/dev/null || true
+# 禁用 colord 密码弹窗
+sudo tee /etc/polkit-1/localauthority/50-local.d/colord.pkla > /dev/null <<EOF
+[Allow colord without password]
+Identity=unix-user:$(logname)
+Action=org.freedesktop.color-manager.*
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
+EOF
 
 echo "🖥️ 安装 xrdp 远程桌面服务..."
 sudo apt install -y xrdp
