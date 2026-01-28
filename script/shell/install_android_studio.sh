@@ -8,7 +8,7 @@ REAL_USER=$(logname)
 USER_HOME=$(eval echo "~$REAL_USER")
 
 # 获取最新版本的android_studio下载链接
-get_latest_android_studio_url() {
+download_latest_android_studio_url() {
   local url
   # 获取最新稳定版的 Linux 压缩包下载直链
   url=$(curl -s https://developer.android.com/studio | \
@@ -18,9 +18,12 @@ get_latest_android_studio_url() {
 
   if [[ -z "$url" ]]; then
     echo "❌ 无法从官网获取最新下载链接。" >&2
-    return 1
+    exit 1
   fi
-  echo "$url"
+  
+  echo "最新安装包下载地址: $url"
+
+  wget "$url" -O android-studio.tar.gz
 }
 
 echo "📥 下载 Android Studio..."
@@ -29,7 +32,7 @@ cd /tmp
 
 # 删除之前下载的文件
 sudo rm -f android-studio.tar.gz
-wget "$(get_latest_android_studio_url)" -O android-studio.tar.gz
+download_latest_android_studio_url
 
 echo "📦 解压并安装 Android Studio..."
 sudo rm -rf android-studio
