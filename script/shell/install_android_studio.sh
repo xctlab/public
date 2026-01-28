@@ -20,8 +20,7 @@ get_latest_android_studio_url() {
     echo "❌ 无法从官网获取最新下载链接。" >&2
     return 1
   fi
-  
-  echo "最新安装包下载地址: $url"
+  echo "$url"
 }
 
 echo "📥 下载 Android Studio..."
