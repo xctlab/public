@@ -10,14 +10,18 @@ USER_HOME=$(eval echo "~$REAL_USER")
 # 获取最新版本的android_studio下载链接
 get_latest_android_studio_url() {
   local url
-  url=$(curl -s https://developer.android.com/studio | grep -Eo 'https://redirector.gvt1.com/edgedl/android/studio/ide-zips/[^"]+/android-studio-[^"]+-linux.tar.gz' | head -n 1)
+  # 获取最新稳定版的 Linux 压缩包下载直链
+  url=$(curl -s https://developer.android.com/studio | \
+    grep -oE "https://[^'\"]+linux\.tar\.gz" | \
+    grep "ide-zips" | \
+    head -n 1)
 
   if [[ -z "$url" ]]; then
     echo "❌ 无法从官网获取最新下载链接。" >&2
     return 1
   fi
-
-  echo "$url"
+  
+  echo "最新安装包下载地址: $url"
 }
 
 echo "📥 下载 Android Studio..."
