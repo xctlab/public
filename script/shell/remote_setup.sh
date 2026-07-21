@@ -5,7 +5,7 @@ scripts=(
     "Linux配置远程桌面环境:install_desktop.sh"
     "Linux安装或更新Android Studio:install_android_studio.sh"
     "Linux配置Android SDK开发环境:install_android_env.sh"
-    "Linux安装安卓11模拟器(gms):install_emu.sh"
+    "Linux安装安卓redroid模拟器:deploy_redroid.sh"
 )
 
 print_menu() {
@@ -22,7 +22,7 @@ run_script() {
         script_name="${script_info%%:*}"
         script_file="${script_info#*:}"
         echo "执行脚本: $script_name"
-        curl -fsSL "${prefix_url}${script_file}" | bash -s --
+        curl -fsSL "${prefix_url}${script_file}" | sudo bash -s --
     else
         echo "无效序号：'$idx'"
     fi
