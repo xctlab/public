@@ -31,11 +31,11 @@ EOF
 # 安装redroid https://github.com/ERSTT/redroid/blob/main/README_CN.md
 install_redroid() {
   if ! sudo docker ps -a --format '{{.Names}}' | grep -q "$REDROID_CONTAINER"; then
-    sudo docker run -itd --privileged \
+    sudo docker run -d --privileged \
       -p "$REDROID_PORT:$REDROID_PORT" \
       --name "$REDROID_CONTAINER" \
       --restart=unless-stopped \
-      kylindemons/redroid:15.0.0_amd64-GApps-latest
+      darknightlab/redroid-14-gms:latest
   else
     echo "$REDROID_CONTAINER 已安装"
     sudo docker start "$REDROID_CONTAINER"
