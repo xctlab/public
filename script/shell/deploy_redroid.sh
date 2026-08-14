@@ -10,18 +10,37 @@ set -Eeuo pipefail
 #   ws-scrcpy -> Docker 内网 -> redroid:5555
 #   本地客户端 -> SSH 隧道 -> 127.0.0.1:5555
 #
-SCRIPT_VERSION="2026.07.21.6"
+# 脚本自身版本，仅用于日志和排查，不影响 Redroid 或 Android 版本。
+SCRIPT_VERSION="2026.08.14.13"
+
+# Redroid 的 Docker 容器名；部署、正常关机和 ADB 连接都会使用该名称。
 REDROID_CONTAINER="${REDROID_CONTAINER:-redroid}"
+# ws-scrcpy 的 Docker 容器名；浏览器远程控制服务使用该容器。
 WS_SCRCPY_CONTAINER="${WS_SCRCPY_CONTAINER:-ws-scrcpy}"
+# 两个容器共用的 Docker 网络；ws-scrcpy 通过容器名连接 Redroid。
 ANDROID_NETWORK="${ANDROID_NETWORK:-android-control}"
+# 宿主机本地 ADB 端口；只绑定 127.0.0.1，不直接暴露到公网。
 REDROID_ADB_PORT="${REDROID_ADB_PORT:-5555}"
+# Android /data 的宿主机持久化目录；重建容器时应用和设置保存在这里。
+# 已经部署后不要随意更换，否则新容器会看到另一套空数据。
 REDROID_DATA_DIR="${REDROID_DATA_DIR:-/var/lib/redroid/data}"
-WS_SCRCPY_BUILD_DIR="${WS_SCRCPY_BUILD_DIR:-/opt/ws-scrcpy-build}"
+# Redroid 镜像；生产环境建议填写带 @sha256:... 的固定镜像摘要。
 REDROID_IMAGE="${REDROID_IMAGE:-darknightlab/redroid-14-gms:latest}"
+# ws-scrcpy 源码版本；可用 master，或使用完整 40 位 Commit 固定版本。
 WS_SCRCPY_REF="${WS_SCRCPY_REF:-master}"
+# 设为 1 表示接受 Redroid 使用 latest 等浮动标签，仅关闭风险提示。
+# 该参数不会改变镜像内容，也不会自动固定镜像版本。
 ALLOW_MUTABLE_IMAGE="${ALLOW_MUTABLE_IMAGE:-0}"
+# 等待 Android 完成启动的最大检查次数；每次检查之间等待 5 秒。
 BOOT_ATTEMPTS="${BOOT_ATTEMPTS:-36}"
+# ws-scrcpy 连接 Redroid ADB 的最大重试次数。
 ADB_ATTEMPTS="${ADB_ATTEMPTS:-60}"
+# 宿主机 Binder 检查与修复脚本；缺少模块时安装当前内核对应的软件包。
+BINDER_SETUP_PATH="${BINDER_SETUP_PATH:-/usr/local/libexec/binder-linux-setup}"
+# Redroid 正常关机脚本；优先请求 Android 自己关机，超时后才由 Docker 停止。
+REDROID_STOP_PATH="${REDROID_STOP_PATH:-/usr/local/libexec/redroid-stop}"
+# 开机检查、安装并加载 Binder 模块的 systemd 服务名。
+BINDER_SERVICE_NAME="${BINDER_SERVICE_NAME:-binder-linux-setup.service}"
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 die() { log "错误：$*" >&2; exit 1; }
@@ -91,35 +110,120 @@ install_docker() {
   # Docker 准备完成后再安装本脚本的其他依赖，不安装 docker.io/containerd。
   apt-get update
   apt-get install -y --no-install-recommends \
-    ca-certificates curl git iproute2 \
-    "linux-modules-extra-$(uname -r)"
-  systemctl enable --now docker
+    ca-certificates curl git iproute2 kmod
+  # 这里只启用服务。Binder 检查通过前不主动启动 Docker，避免已有
+  # restart 容器抢先启动 Redroid。
+  systemctl enable docker
 }
 
-# 安装并加载binder_linux模块。
-# 这是对“升级内核后 reboot，Redroid 因缺少 Binder 启动循环”的修复。
+# BinderFS 注册且传统设备或 BinderFS 设备完整存在，才允许执行 Android /init。
+binder_is_ready() {
+  grep -qE '^[[:space:]]*nodev[[:space:]]+binder$' /proc/filesystems || return 1
+  if [[ -c /dev/binder && -c /dev/hwbinder && -c /dev/vndbinder ]]; then
+    return 0
+  fi
+  [[ -c /dev/binderfs/binder ]] \
+    && [[ -c /dev/binderfs/hwbinder ]] \
+    && [[ -c /dev/binderfs/vndbinder ]]
+}
+
+# 新内核可能只通过 BinderFS 创建设备，不再在 /dev 根目录生成传统节点。
+ensure_binder_devices() {
+  if [[ -c /dev/binder && -c /dev/hwbinder && -c /dev/vndbinder ]]; then
+    return
+  fi
+  install -d -m 0755 /dev/binderfs
+  mountpoint -q /dev/binderfs || mount -t binder binder /dev/binderfs
+}
+
+# BinderFS 新建设备默认为 0600，Android 的 system 用户无法访问。
+set_binder_device_permissions() {
+  local device
+  for device in \
+    /dev/binder /dev/hwbinder /dev/vndbinder \
+    /dev/binderfs/binder /dev/binderfs/hwbinder /dev/binderfs/vndbinder; do
+    [[ -c "$device" ]] && chmod 0666 "$device"
+  done
+}
+
+# Ubuntu 将部分内核驱动拆到与当前内核精确匹配的 modules-extra 包中。
+# 其他发行版如果已经内置或提供 binder_linux，则不会进入此安装分支。
+install_kernel_extra_meta_if_available() {
+  local kernel_release kernel_flavor meta_package
+  kernel_release="$(uname -r)"
+  kernel_flavor="${kernel_release##*-}"
+  meta_package="linux-modules-extra-${kernel_flavor}"
+  if command -v apt-get >/dev/null 2>&1 \
+    && apt-cache show "$meta_package" >/dev/null 2>&1; then
+    apt-get install -y --no-install-recommends "$meta_package"
+  else
+    log "未发现可用的内核扩展元包 ${meta_package}；后续内核升级由启动保护兜底"
+  fi
+}
+
+install_current_kernel_binder_package() {
+  local kernel_release exact_package
+  kernel_release="$(uname -r)"
+  exact_package="linux-modules-extra-${kernel_release}"
+
+  command -v apt-get >/dev/null 2>&1 \
+    || die "当前内核缺少 binder_linux，请为 ${kernel_release} 安装对应 Binder 模块"
+  apt-get update
+  apt-cache show "$exact_package" >/dev/null 2>&1 \
+    || die "软件源中不存在 ${exact_package}，请为当前内核安装 Binder 模块"
+  apt-get install -y --no-install-recommends "$exact_package"
+}
+
+# 安装并加载 binder_linux。即使未来内核缺少模块，Docker 仍可启动；
+# Redroid 的独立服务会修复 Binder，直接 docker start 则会因缺少映射设备而失败。
 install_binder_linux() {
-  # 新安装模块后重建 modules.dep，否则 modprobe 可能仍报告 Module not found。
-  depmod -a "$(uname -r)"
-  modprobe binder_linux
-
-  # Redroid 使用 BinderFS。只看到模块文件还不够，文件系统必须真正注册。
-  grep -qE '^[[:space:]]*nodev[[:space:]]+binder$' /proc/filesystems \
-    || die "BinderFS 未注册，请检查当前内核的 linux-modules-extra 包"
-
-  # 开机自动加载 Binder，并确保 Docker 恢复容器前模块已经加载完成。
-  printf 'binder_linux\n' >/etc/modules-load.d/redroid-binder.conf
-  mkdir -p /etc/systemd/system/docker.service.d
-  cat >/etc/systemd/system/docker.service.d/binder.conf <<'EOF'
-[Unit]
-After=systemd-modules-load.service
-Requires=systemd-modules-load.service
-EOF
+  # 旧脚本曾让整个 Docker 依赖 modules-load；先解除该耦合，避免 Binder
+  # 修复失败时连带阻止打包容器启动。
+  rm -f /etc/systemd/system/docker.service.d/binder.conf
+  rmdir /etc/systemd/system/docker.service.d >/dev/null 2>&1 || true
   systemctl daemon-reload
+
+  install -d -m 0755 /etc/modules-load.d /etc/modprobe.d
+  rm -f /etc/modules-load.d/redroid-binder.conf
+  printf 'options binder_linux devices="binder,hwbinder,vndbinder"\n' \
+    >/etc/modprobe.d/binder_linux.conf
+  printf 'binder_linux\n' >/etc/modules-load.d/binder-linux.conf
+
+  if ! modprobe binder_linux >/dev/null 2>&1; then
+    install_current_kernel_binder_package
+    depmod -a "$(uname -r)"
+    modprobe binder_linux
+  fi
+
+  ensure_binder_devices
+  set_binder_device_permissions
+  # udev 创建设备可能稍有延迟。
+  for _ in {1..10}; do
+    binder_is_ready && break
+    sleep 0.5
+  done
+  binder_is_ready \
+    || die "Binder 未就绪：请检查 /dev/binder 或 /dev/binderfs 下的三个 Binder 设备"
+  install_kernel_extra_meta_if_available
+
 }
 
 # 在修改系统和容器前验证参数，避免部署到一半才发现配置无效。
 validate_inputs() {
+  [[ "$REDROID_CONTAINER" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
+    || die "REDROID_CONTAINER 不是有效的 Docker 容器名"
+  [[ "$WS_SCRCPY_CONTAINER" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
+    || die "WS_SCRCPY_CONTAINER 不是有效的 Docker 容器名"
+  [[ "$ANDROID_NETWORK" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
+    || die "ANDROID_NETWORK 不是有效的 Docker 网络名"
+  [[ "$BINDER_SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] \
+    || die "BINDER_SERVICE_NAME 不是有效的 systemd 服务名"
+  [[ "$BINDER_SETUP_PATH" == /* && "$REDROID_STOP_PATH" == /* ]] \
+    || die "Binder 修复和 Redroid 停止脚本路径必须是绝对路径"
+  [[ "$BOOT_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] \
+    || die "BOOT_ATTEMPTS 必须是正整数"
+  [[ "$ADB_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] \
+    || die "ADB_ATTEMPTS 必须是正整数"
   [[ "$REDROID_ADB_PORT" =~ ^[0-9]+$ ]] && (( REDROID_ADB_PORT >= 1 && REDROID_ADB_PORT <= 65535 )) \
     || die "REDROID_ADB_PORT 必须是 1-65535"
   # 默认保持原脚本行为，构建 ws-scrcpy 的 master；也可传完整 Commit 固定版本。
@@ -227,46 +331,207 @@ connect_network() {
   fi
 }
 
-# 安装redroid https://github.com/ERSTT/redroid/blob/main/README_CN.md
-install_redroid() {
-  if container_exists "$REDROID_CONTAINER"; then
-    log "$REDROID_CONTAINER 已存在，保留容器和数据"
-    connect_network "$REDROID_CONTAINER"
+# 宿主机修复脚本供 systemd 使用：先检查，缺失时安装当前内核模块，
+# 最后加载 binder_linux 并验证实际设备。
+install_binder_setup_script() {
+  install -d -m 0755 "$(dirname "$BINDER_SETUP_PATH")"
 
-    # Binder 在容器启动时挂载。模块刚恢复时必须重启容器，不能只 docker start。
-    if container_running "$REDROID_CONTAINER"; then
-      log "重启 $REDROID_CONTAINER，使 Binder 初始化重新执行"
-      docker restart --time 30 "$REDROID_CONTAINER" >/dev/null
-    else
-      docker start "$REDROID_CONTAINER" >/dev/null
-    fi
+  cat >"$BINDER_SETUP_PATH" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-    # 不自动迁移旧容器数据，避免错误复制或删除用户现有 Android 数据。
-    if [[ "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}yes{{end}}{{end}}' "$REDROID_CONTAINER")" != "yes" ]]; then
-      log "警告：现有容器的 /data 未持久化；重建容器会丢失 Android 数据"
-    fi
+binder_is_ready() {
+  grep -qE '^[[:space:]]*nodev[[:space:]]+binder$' /proc/filesystems || return 1
+  if test -c /dev/binder && test -c /dev/hwbinder && test -c /dev/vndbinder; then
+    return 0
+  fi
+  test -c /dev/binderfs/binder \
+    && test -c /dev/binderfs/hwbinder \
+    && test -c /dev/binderfs/vndbinder
+}
+
+ensure_binder_devices() {
+  if test -c /dev/binder && test -c /dev/hwbinder && test -c /dev/vndbinder; then
     return
   fi
+  install -d -m 0755 /dev/binderfs
+  mountpoint -q /dev/binderfs || mount -t binder binder /dev/binderfs
+}
 
-  # 新部署将 /data 保存到宿主机，容器重建后应用和设置仍然保留。
-  install -d -m 0755 "$REDROID_DATA_DIR"
-  docker pull "$REDROID_IMAGE"
-  docker run -d \
+set_binder_device_permissions() {
+  for device in \
+    /dev/binder /dev/hwbinder /dev/vndbinder \
+    /dev/binderfs/binder /dev/binderfs/hwbinder /dev/binderfs/vndbinder; do
+    test -c "$device" && chmod 0666 "$device"
+  done
+}
+
+if binder_is_ready; then
+  set_binder_device_permissions
+  exit 0
+fi
+
+install -d -m 0755 /etc/modules-load.d /etc/modprobe.d
+rm -f /etc/modules-load.d/redroid-binder.conf
+printf 'options binder_linux devices="binder,hwbinder,vndbinder"\n' \
+  >/etc/modprobe.d/binder_linux.conf
+printf 'binder_linux\n' >/etc/modules-load.d/binder-linux.conf
+
+if ! modprobe binder_linux >/dev/null 2>&1; then
+  kernel_release="$(uname -r)"
+  package="linux-modules-extra-${kernel_release}"
+  command -v apt-get >/dev/null 2>&1 \
+    || { echo "Binder 修复失败：系统没有 apt-get，请为 ${kernel_release} 安装 binder_linux" >&2; exit 1; }
+
+  echo "当前内核缺少 binder_linux，正在安装 ${package}"
+  apt-get -o DPkg::Lock::Timeout=120 update
+  apt-cache show "$package" >/dev/null 2>&1 \
+    || { echo "Binder 修复失败：软件源中不存在 ${package}" >&2; exit 1; }
+  apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends "$package"
+  depmod -a "$kernel_release"
+  modprobe binder_linux
+fi
+
+ensure_binder_devices
+set_binder_device_permissions
+for _ in {1..10}; do
+  binder_is_ready && exit 0
+  sleep 0.5
+done
+
+grep -qE '^[[:space:]]*nodev[[:space:]]+binder$' /proc/filesystems \
+  || { echo "Binder 修复失败：BinderFS 未注册" >&2; exit 1; }
+binder_is_ready \
+  || { echo "Binder 修复失败：/dev/binder 和 /dev/binderfs 中都没有完整设备" >&2; exit 1; }
+EOF
+  chmod 0755 "$BINDER_SETUP_PATH"
+}
+
+install_redroid_stop_script() {
+  install -d -m 0755 "$(dirname "$REDROID_STOP_PATH")"
+  cat >"$REDROID_STOP_PATH" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+container="${1:?缺少 Redroid 容器名}"
+[[ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" == "true" ]] \
+  || exit 0
+
+# Android init 处理 sys.powerctl 后会自行退出；正常关机实测退出码为 130。
+docker exec "$container" setprop sys.powerctl shutdown >/dev/null 2>&1 || true
+for _ in {1..30}; do
+  [[ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" != "true" ]] \
+    && exit 0
+  sleep 1
+done
+
+docker stop --timeout 10 "$container" >/dev/null
+EOF
+  chmod 0755 "$REDROID_STOP_PATH"
+}
+
+create_redroid_container() {
+  local image="$1"
+  local data_dir="$2"
+  local binder_device_dir="/dev"
+  if [[ ! -c /dev/binder || ! -c /dev/hwbinder || ! -c /dev/vndbinder ]]; then
+    binder_device_dir="/dev/binderfs"
+  fi
+  [[ -c "$binder_device_dir/binder" \
+    && -c "$binder_device_dir/hwbinder" \
+    && -c "$binder_device_dir/vndbinder" ]] \
+    || die "创建 Redroid 失败：宿主机 Binder 设备不完整"
+  docker create \
     --name "$REDROID_CONTAINER" \
     --hostname "$REDROID_CONTAINER" \
     --privileged \
     --restart unless-stopped \
     --network "$ANDROID_NETWORK" \
     -p "127.0.0.1:${REDROID_ADB_PORT}:5555" \
-    -v "$REDROID_DATA_DIR:/data" \
-    "$REDROID_IMAGE" >/dev/null
+    --mount "type=bind,src=$binder_device_dir/binder,dst=/dev/binder" \
+    --mount "type=bind,src=$binder_device_dir/hwbinder,dst=/dev/hwbinder" \
+    --mount "type=bind,src=$binder_device_dir/vndbinder,dst=/dev/vndbinder" \
+    -v "$data_dir:/data" \
+    "$image" >/dev/null
+}
+
+# 安装redroid https://github.com/ERSTT/redroid/blob/main/README_CN.md
+install_redroid() {
+  if container_exists "$REDROID_CONTAINER"; then
+    log "停止并删除现有 $REDROID_CONTAINER 容器；宿主机 Android 数据目录保持不变"
+    "$REDROID_STOP_PATH" "$REDROID_CONTAINER" || true
+    docker rm -f "$REDROID_CONTAINER" >/dev/null
+  fi
+
+  # /data 保存在宿主机，重建容器不会删除该目录中的应用和设置。
+  install -d -m 0755 "$REDROID_DATA_DIR"
+  docker pull "$REDROID_IMAGE"
+  create_redroid_container "$REDROID_IMAGE" "$REDROID_DATA_DIR"
+}
+
+# Binder 服务只负责宿主机模块的检查、安装和加载。Docker 弱依赖该服务：
+# 会等待检查结束，但 Binder 修复失败不会阻止 Docker 和打包容器启动。
+configure_binder_startup() {
+  cat >"/etc/systemd/system/$BINDER_SERVICE_NAME" <<EOF
+[Unit]
+Description=Ensure Linux Binder kernel module and devices
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$BINDER_SETUP_PATH
+RemainAfterExit=yes
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  install -d -m 0755 /etc/systemd/system/docker.service.d
+  cat >/etc/systemd/system/docker.service.d/binder-linux-setup.conf <<EOF
+[Unit]
+Wants=$BINDER_SERVICE_NAME
+After=$BINDER_SERVICE_NAME
+EOF
+
+  systemctl daemon-reload
+  systemctl enable "$BINDER_SERVICE_NAME"
+  systemctl restart "$BINDER_SERVICE_NAME"
+  docker update --restart=unless-stopped "$REDROID_CONTAINER" >/dev/null
+  docker start "$REDROID_CONTAINER" >/dev/null
+}
+
+wait_for_redroid_boot() {
+  local i container_status exit_code
+  log "等待 Redroid Android Framework 完成启动"
+  for ((i=1; i<=BOOT_ATTEMPTS; i++)); do
+    if container_running "$REDROID_CONTAINER" \
+      && [[ "$(timeout 5s docker exec "$REDROID_CONTAINER" getprop sys.boot_completed 2>/dev/null || true)" == "1" ]]; then
+      log "Redroid 已完成启动"
+      return
+    fi
+    container_status="$(docker inspect -f '{{.State.Status}}' "$REDROID_CONTAINER" 2>/dev/null || true)"
+    exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$REDROID_CONTAINER" 2>/dev/null || true)"
+    if [[ "$container_status" == "exited" ]]; then
+      log "Redroid 容器已提前退出，退出码=${exit_code:-未知}"
+      break
+    fi
+    sleep 5
+  done
+
+  "$REDROID_STOP_PATH" "$REDROID_CONTAINER" || true
+  die "Redroid 未在限定时间内完成启动，已安全停止；请查看 docker logs $REDROID_CONTAINER"
 }
 
 # 手动打包ws-scrcpy镜像，Docker仓库里的版本通常较旧。
 # 使用完整 Git Commit，避免每次构建得到不同的 master 内容。
-build_ws_scrcpy() {
-  install -d -m 0755 "$WS_SCRCPY_BUILD_DIR"
-  cat >"$WS_SCRCPY_BUILD_DIR/Dockerfile" <<'EOF'
+build_ws_scrcpy() (
+  local build_dir
+  build_dir="$(mktemp -d "${TMPDIR:-/tmp}/ws-scrcpy-build.XXXXXX")"
+  trap 'rm -rf "$build_dir"' EXIT
+
+  cat >"$build_dir/Dockerfile" <<'EOF'
 FROM node:18-bookworm
 ARG WS_SCRCPY_REF
 RUN apt-get update \
@@ -286,8 +551,8 @@ EOF
   docker build --pull --progress=plain \
     --build-arg "WS_SCRCPY_REF=$WS_SCRCPY_REF" \
     -t "ws-scrcpy:${WS_SCRCPY_REF}" \
-    "$WS_SCRCPY_BUILD_DIR"
-}
+    "$build_dir"
+)
 
 # 安装ws-scrcpy，直接将容器 8000 映射到公网固定端口 8000。
 install_ws_scrcpy() {
@@ -406,8 +671,13 @@ main() {
   validate_inputs
   install_docker
   install_binder_linux
+  systemctl start docker
+  install_binder_setup_script
+  install_redroid_stop_script
   ensure_network
   install_redroid
+  configure_binder_startup
+  wait_for_redroid_boot
   install_ws_scrcpy
   configure_ws_scrcpy_auto_connect
 
