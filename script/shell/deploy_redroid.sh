@@ -11,7 +11,7 @@ set -Eeuo pipefail
 #   本地客户端 -> SSH 隧道 -> 127.0.0.1:5555
 #
 # 脚本自身版本，仅用于日志和排查，不影响 Redroid 或 Android 版本。
-SCRIPT_VERSION="2026.08.14.13"
+SCRIPT_VERSION="2026.08.18.14"
 
 # Redroid 的 Docker 容器名；部署、正常关机和 ADB 连接都会使用该名称。
 REDROID_CONTAINER="${REDROID_CONTAINER:-redroid}"
@@ -24,8 +24,8 @@ REDROID_ADB_PORT="${REDROID_ADB_PORT:-5555}"
 # Android /data 的宿主机持久化目录；重建容器时应用和设置保存在这里。
 # 已经部署后不要随意更换，否则新容器会看到另一套空数据。
 REDROID_DATA_DIR="${REDROID_DATA_DIR:-/var/lib/redroid/data}"
-# Redroid 镜像；生产环境建议填写带 @sha256:... 的固定镜像摘要。
-REDROID_IMAGE="${REDROID_IMAGE:-darknightlab/redroid-14-gms:latest}"
+# Redroid 镜像。固定摘要，避免 latest 在重建容器时静默切换内容。
+REDROID_IMAGE="${REDROID_IMAGE:-darknightlab/redroid-14-gms@sha256:d6e052064341c5b025a75471b011df31e9a5d76adb8b8cbba97f58e598f108fa}"
 # ws-scrcpy 源码版本；可用 master，或使用完整 40 位 Commit 固定版本。
 WS_SCRCPY_REF="${WS_SCRCPY_REF:-master}"
 # 设为 1 表示接受 Redroid 使用 latest 等浮动标签，仅关闭风险提示。
@@ -502,6 +502,41 @@ EOF
   docker start "$REDROID_CONTAINER" >/dev/null
 }
 
+# darknightlab/redroid-14-gms 的 Google APK 被打包为 0777。Android 14
+# 会拒绝加载当前进程可写的 dex，因此必须在首次启动后修正容器可写层。
+fix_redroid_gms_apk_permissions() {
+  local apk mode
+  local changed=0
+  local gms_apks=(
+    /system/app/GoogleCalendarSyncAdapter/GoogleCalendarSyncAdapter.apk
+    /system/app/GoogleContactsSyncAdapter/GoogleContactsSyncAdapter.apk
+    /system/priv-app/GmsCore/GmsCore.apk
+    /system/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk
+    /system/priv-app/Phonesky/Phonesky.apk
+  )
+
+  for apk in "${gms_apks[@]}"; do
+    if ! docker exec "$REDROID_CONTAINER" test -f "$apk"; then
+      log "警告：镜像中不存在预期的 GMS APK：$apk"
+      continue
+    fi
+
+    mode="$(docker exec "$REDROID_CONTAINER" stat -c '%a' "$apk")"
+    if [[ "$mode" != "644" && "$mode" != "0644" ]]; then
+      log "修复 GMS APK 权限：$apk（$mode -> 644）"
+      docker exec "$REDROID_CONTAINER" chmod 0644 "$apk"
+      changed=1
+    fi
+  done
+
+  if (( changed )); then
+    log "GMS APK 权限已修复，重启 Redroid 使 Android 重新扫描系统应用"
+    docker restart --time 30 "$REDROID_CONTAINER" >/dev/null
+  else
+    log "GMS APK 权限已符合 Android 14 要求"
+  fi
+}
+
 wait_for_redroid_boot() {
   local i container_status exit_code
   log "等待 Redroid Android Framework 完成启动"
@@ -677,6 +712,7 @@ main() {
   ensure_network
   install_redroid
   configure_binder_startup
+  fix_redroid_gms_apk_permissions
   wait_for_redroid_boot
   install_ws_scrcpy
   configure_ws_scrcpy_auto_connect
