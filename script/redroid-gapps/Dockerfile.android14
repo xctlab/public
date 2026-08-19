@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1.7
+
+ARG REDROID_BASE_IMAGE=redroid/redroid:14.0.0-latest@sha256:a3e654caad74faed03cd5ead057a989e06f507778cda678e5d3b9772e0092f1c
+ARG GAPPS_ARCH=x86_64
+
+# MindTheGapps' ZIP signing bundle includes a Linux x86_64 Conscrypt JNI
+# library, so the builder must run as amd64 even on an arm64 build host.
+FROM --platform=linux/amd64 ubuntu:24.04 AS gapps-builder
+
+ARG MINDTHEGAPPS_REPOSITORY=https://gitlab.com/MindTheGapps/vendor_gapps.git
+ARG MINDTHEGAPPS_COMMIT=f75de2aa2af5d2662e394d833464e8dda55c9e6e
+ARG GAPPS_ARCH
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates \
+        busybox-static \
+        coreutils \
+        git \
+        git-lfs \
+        make \
+        openjdk-17-jre-headless \
+        unzip \
+        zip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work/vendor_gapps
+
+RUN git init \
+    && git remote add origin "$MINDTHEGAPPS_REPOSITORY" \
+    && git lfs install --local \
+    && git fetch --depth 1 origin "$MINDTHEGAPPS_COMMIT" \
+    && git checkout --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = "$MINDTHEGAPPS_COMMIT"
+
+COPY patches/mindthegapps-device-configurator.patch /tmp/mindthegapps-device-configurator.patch
+
+RUN git apply --check /tmp/mindthegapps-device-configurator.patch \
+    && git apply /tmp/mindthegapps-device-configurator.patch \
+    && grep -Fq '<string name="config_deviceConfiguratorPackageName" translatable="false">com.google.android.gms</string>' \
+        overlay/GmsOverlay/res/values/config.xml \
+    && make "gapps_${GAPPS_ARCH}"
+
+RUN mkdir -p /staging \
+    && unzip -q "$(find out -maxdepth 1 -type f -name "MindTheGapps-14.0.0-${GAPPS_ARCH}-*.zip" -print -quit)" -d /staging \
+    && rm -rf \
+        /staging/META-INF \
+        /staging/build.prop \
+        /staging/toybox \
+        /staging/system/addon.d \
+    && find /staging/system -type d -exec chmod 0755 {} + \
+    && find /staging/system -type f -exec chmod 0644 {} + \
+    && chown -R 0:0 /staging/system
+
+FROM --platform=$TARGETPLATFORM ${REDROID_BASE_IMAGE}
+
+ARG MINDTHEGAPPS_COMMIT=f75de2aa2af5d2662e394d833464e8dda55c9e6e
+ARG REDROID_BASE_IMAGE
+ARG GAPPS_ARCH
+
+LABEL org.opencontainers.image.title="Redroid 14 with MindTheGapps" \
+      org.opencontainers.image.description="Official Redroid 14 with a pinned MindTheGapps build" \
+      io.redroid.gapps.mindthegapps.commit="$MINDTHEGAPPS_COMMIT" \
+      io.redroid.gapps.device-configurator="true" \
+      io.redroid.gapps.redroid-base="$REDROID_BASE_IMAGE" \
+      io.redroid.gapps.arch="$GAPPS_ARCH"
+
+# MindTheGapps uses system/product and system/system_ext paths, matching the
+# flattened partition layout in the official Redroid container image.
+COPY --from=gapps-builder /staging/system/ /system/
+COPY --from=gapps-builder /usr/bin/busybox /tmp/busybox
+
+# SetupWizard replaces the AOSP Provision package. All packaged files have
+# already been normalized to Android system ownership and permissions.
+RUN ["/tmp/busybox", "sh", "-c", "rm -rf /system/system_ext/priv-app/Provision && test -f /system/product/priv-app/GmsCore/GmsCore.apk && test -f /system/system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk && test -f /system/product/overlay/GmsOverlay.apk && rm /tmp/busybox"]

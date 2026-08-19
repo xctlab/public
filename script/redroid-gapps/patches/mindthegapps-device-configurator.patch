@@ -1,0 +1,14 @@
+diff --git a/overlay/GmsOverlay/res/values/config.xml b/overlay/GmsOverlay/res/values/config.xml
+index b2a0a54..00fea51 100644
+--- a/overlay/GmsOverlay/res/values/config.xml
++++ b/overlay/GmsOverlay/res/values/config.xml
+@@ -73,6 +73,9 @@
+     <!-- The name of the package that will handle updating the device management role. -->
+     <string name="config_devicePolicyManagementUpdater" translatable="false">com.google.android.gms</string>
+ 
++    <!-- Package granted the platform configurator permission set, including DeviceConfig writes. -->
++    <string name="config_deviceConfiguratorPackageName" translatable="false">com.google.android.gms</string>
++
+     <!-- Flag indicating which package name can access the persistent data partition -->
+     <string name="config_persistentDataPackageName" translatable="false">com.google.android.gms</string>
+ </resources>

@@ -1,46 +1,47 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Redroid + ws-scrcpy 部署脚本
+# Redroid + ws-scrcpy 多版本部署脚本
 #
 # 公网访问链路：
 #   浏览器 :8000 -> ws-scrcpy
 #
 # ADB 访问链路：
-#   ws-scrcpy -> Docker 内网 -> redroid:5555
-#   本地客户端 -> SSH 隧道 -> 127.0.0.1:5555
+#   ws-scrcpy -> Docker 内网 -> redroid-androidXX:5555
+#   本地客户端 -> SSH 隧道 -> 127.0.0.1:15500+API Level
 #
 # 脚本自身版本，仅用于日志和排查，不影响 Redroid 或 Android 版本。
-SCRIPT_VERSION="2026.08.18.14"
+SCRIPT_VERSION="2026.08.19.5"
 
-# Redroid 的 Docker 容器名；部署、正常关机和 ADB 连接都会使用该名称。
-REDROID_CONTAINER="${REDROID_CONTAINER:-redroid}"
-# ws-scrcpy 的 Docker 容器名；浏览器远程控制服务使用该容器。
-WS_SCRCPY_CONTAINER="${WS_SCRCPY_CONTAINER:-ws-scrcpy}"
-# 两个容器共用的 Docker 网络；ws-scrcpy 通过容器名连接 Redroid。
-ANDROID_NETWORK="${ANDROID_NETWORK:-android-control}"
-# 宿主机本地 ADB 端口；只绑定 127.0.0.1，不直接暴露到公网。
-REDROID_ADB_PORT="${REDROID_ADB_PORT:-5555}"
-# Android /data 的宿主机持久化目录；重建容器时应用和设置保存在这里。
-# 已经部署后不要随意更换，否则新容器会看到另一套空数据。
-REDROID_DATA_DIR="${REDROID_DATA_DIR:-/var/lib/redroid/data}"
-# Redroid 镜像。固定摘要，避免 latest 在重建容器时静默切换内容。
-REDROID_IMAGE="${REDROID_IMAGE:-darknightlab/redroid-14-gms@sha256:d6e052064341c5b025a75471b011df31e9a5d76adb8b8cbba97f58e598f108fa}"
-# ws-scrcpy 源码版本；可用 master，或使用完整 40 位 Commit 固定版本。
-WS_SCRCPY_REF="${WS_SCRCPY_REF:-master}"
-# 设为 1 表示接受 Redroid 使用 latest 等浮动标签，仅关闭风险提示。
-# 该参数不会改变镜像内容，也不会自动固定镜像版本。
-ALLOW_MUTABLE_IMAGE="${ALLOW_MUTABLE_IMAGE:-0}"
-# 等待 Android 完成启动的最大检查次数；每次检查之间等待 5 秒。
-BOOT_ATTEMPTS="${BOOT_ATTEMPTS:-36}"
-# ws-scrcpy 连接 Redroid ADB 的最大重试次数。
-ADB_ATTEMPTS="${ADB_ATTEMPTS:-60}"
-# 宿主机 Binder 检查与修复脚本；缺少模块时安装当前内核对应的软件包。
-BINDER_SETUP_PATH="${BINDER_SETUP_PATH:-/usr/local/libexec/binder-linux-setup}"
-# Redroid 正常关机脚本；优先请求 Android 自己关机，超时后才由 Docker 停止。
-REDROID_STOP_PATH="${REDROID_STOP_PATH:-/usr/local/libexec/redroid-stop}"
-# 开机检查、安装并加载 Binder 模块的 systemd 服务名。
-BINDER_SERVICE_NAME="${BINDER_SERVICE_NAME:-binder-linux-setup.service}"
+# 唯一部署参数是规范容器名。不传参数时显示交互菜单。
+REDROID_CONTAINER="${1:-}"
+
+# 以下均为脚本内部配置，不作为安装参数暴露。
+WS_SCRCPY_CONTAINER="ws-scrcpy"
+ANDROID_NETWORK="android-control"
+WS_SCRCPY_REF="master"
+WS_SCRCPY_PORT="8000"
+BOOT_ATTEMPTS="60"
+ADB_ATTEMPTS="60"
+BINDER_SETUP_PATH="/usr/local/libexec/binder-linux-setup"
+REDROID_STOP_PATH="/usr/local/libexec/redroid-stop"
+BINDER_SERVICE_NAME="binder-linux-setup.service"
+INSTANCE_REGISTRY_DIR="/etc/redroid/instances.d"
+GAPPS_BUILD_CONTEXT="https://github.com/xctlab/public.git#main:script/redroid-gapps"
+
+ANDROID_VERSION=""
+SDK_VERSION=""
+REDROID_DATA_DIR=""
+REDROID_IMAGE=""
+REDROID_BASE_IMAGE=""
+REDROID_ADB_PORT=""
+IMAGE_HAS_GMS="0"
+GAPPS_FLAVOR="none"
+GAPPS_URL=""
+GAPPS_SHA256=""
+GAPPS_SOURCE=""
+GAPPS_GRANT_DEVICE_CONFIG="1"
+OVERLAY_REQUIRED="1"
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 die() { log "错误：$*" >&2; exit 1; }
@@ -116,34 +117,9 @@ install_docker() {
   systemctl enable docker
 }
 
-# BinderFS 注册且传统设备或 BinderFS 设备完整存在，才允许执行 Android /init。
+# Redroid 的 privileged 容器会建立自己的 Binder 设备；宿主机只需注册 BinderFS。
 binder_is_ready() {
-  grep -qE '^[[:space:]]*nodev[[:space:]]+binder$' /proc/filesystems || return 1
-  if [[ -c /dev/binder && -c /dev/hwbinder && -c /dev/vndbinder ]]; then
-    return 0
-  fi
-  [[ -c /dev/binderfs/binder ]] \
-    && [[ -c /dev/binderfs/hwbinder ]] \
-    && [[ -c /dev/binderfs/vndbinder ]]
-}
-
-# 新内核可能只通过 BinderFS 创建设备，不再在 /dev 根目录生成传统节点。
-ensure_binder_devices() {
-  if [[ -c /dev/binder && -c /dev/hwbinder && -c /dev/vndbinder ]]; then
-    return
-  fi
-  install -d -m 0755 /dev/binderfs
-  mountpoint -q /dev/binderfs || mount -t binder binder /dev/binderfs
-}
-
-# BinderFS 新建设备默认为 0600，Android 的 system 用户无法访问。
-set_binder_device_permissions() {
-  local device
-  for device in \
-    /dev/binder /dev/hwbinder /dev/vndbinder \
-    /dev/binderfs/binder /dev/binderfs/hwbinder /dev/binderfs/vndbinder; do
-    [[ -c "$device" ]] && chmod 0666 "$device"
-  done
+  grep -qE '^[[:space:]]*nodev[[:space:]]+binder$' /proc/filesystems
 }
 
 # Ubuntu 将部分内核驱动拆到与当前内核精确匹配的 modules-extra 包中。
@@ -174,8 +150,7 @@ install_current_kernel_binder_package() {
   apt-get install -y --no-install-recommends "$exact_package"
 }
 
-# 安装并加载 binder_linux。即使未来内核缺少模块，Docker 仍可启动；
-# Redroid 的独立服务会修复 Binder，直接 docker start 则会因缺少映射设备而失败。
+# 安装并加载 binder_linux。已经运行的实例不会因此重启。
 install_binder_linux() {
   # 旧脚本曾让整个 Docker 依赖 modules-load；先解除该耦合，避免 Binder
   # 修复失败时连带阻止打包容器启动。
@@ -195,20 +170,119 @@ install_binder_linux() {
     modprobe binder_linux
   fi
 
-  ensure_binder_devices
-  set_binder_device_permissions
-  # udev 创建设备可能稍有延迟。
-  for _ in {1..10}; do
-    binder_is_ready && break
-    sleep 0.5
-  done
   binder_is_ready \
-    || die "Binder 未就绪：请检查 /dev/binder 或 /dev/binderfs 下的三个 Binder 设备"
+    || die "Binder 未就绪：当前内核没有注册 BinderFS"
   install_kernel_extra_meta_if_available
 
 }
 
-# 在修改系统和容器前验证参数，避免部署到一半才发现配置无效。
+# 无参数运行时从真实终端读取选择，兼容 curl | sudo bash 的调用方式。
+choose_release_interactively() {
+  local selection
+  [[ -r /dev/tty ]] || die "无交互终端，请传入容器名，例如：$0 redroid-android15"
+  cat >/dev/tty <<'EOF'
+请选择要部署的 Android 系统：
+  1) redroid-android81 / Android 8.1 / API 27 / GMS
+  2) redroid-android11 / Android 11  / API 30 / GMS
+  3) redroid-android12 / Android 12  / API 31 / AOSP
+  4) redroid-android13 / Android 13  / API 33 / GMS
+  5) redroid-android14 / Android 14  / API 34 / GMS
+  6) redroid-android15 / Android 15  / API 35 / GMS
+输入序号或容器名：
+EOF
+  read -r selection </dev/tty
+  case "$selection" in
+    1) REDROID_CONTAINER="redroid-android81" ;;
+    2) REDROID_CONTAINER="redroid-android11" ;;
+    3) REDROID_CONTAINER="redroid-android12" ;;
+    4) REDROID_CONTAINER="redroid-android13" ;;
+    5) REDROID_CONTAINER="redroid-android14" ;;
+    6) REDROID_CONTAINER="redroid-android15" ;;
+    redroid-android81|redroid-android11|redroid-android12|redroid-android13|redroid-android14|redroid-android15)
+      REDROID_CONTAINER="$selection"
+      ;;
+    *) die "无效选择：$selection" ;;
+  esac
+}
+
+# 根据规范容器名选择经过验证的系统版本、API Level 和固定镜像。
+select_release() {
+  (( $# <= 1 )) || die "只接受一个可选参数：规范容器名，例如 $0 redroid-android15"
+  [[ -n "$REDROID_CONTAINER" ]] || choose_release_interactively
+
+  case "$REDROID_CONTAINER" in
+    redroid-android81)
+      ANDROID_VERSION="8.1"
+      SDK_VERSION="27"
+      REDROID_BASE_IMAGE="redroid/redroid:8.1.0-latest@sha256:ad6fd8ec7d9cdbc6856e0f3bd51ed06ebdde3d76ecbc71e886ed4314c3e9bfda"
+      REDROID_IMAGE="local/redroid-81-gms:2026.08.19"
+      IMAGE_HAS_GMS="1"
+      GAPPS_FLAVOR="archive"
+      GAPPS_URL="https://downloads.sourceforge.net/project/litegapps/litegapps/x86_64/27/lite/v2.6/%5BAUTO%5DLiteGapps_x86_64_8.1_v2.6_official.zip"
+      GAPPS_SHA256="3e4c79d46de31a3131745dbb9586f4d71a268f94bdf79829e7d95d4509b85f8b"
+      GAPPS_SOURCE="litegapps-8.1-x86_64"
+      GAPPS_GRANT_DEVICE_CONFIG="0"
+      OVERLAY_REQUIRED="0"
+      ;;
+    redroid-android11)
+      ANDROID_VERSION="11"
+      SDK_VERSION="30"
+      REDROID_BASE_IMAGE="redroid/redroid:11.0.0-latest@sha256:60b0810684be4578733a847be3314c50b70f73bc92405b5a627ebe9b633ebb5e"
+      REDROID_IMAGE="local/redroid-11-gms:2026.08.19"
+      IMAGE_HAS_GMS="1"
+      GAPPS_FLAVOR="archive"
+      GAPPS_URL="https://downloads.sourceforge.net/project/litegapps/litegapps/x86_64/30/lite/2024-10-12/AUTO-LiteGapps-x86_64-11.0-20241012-official.zip"
+      GAPPS_SHA256="96f5d1f7c9f73a4f27658603e3c9e049c72f58ac777b0bae51a3658c648cbdf4"
+      GAPPS_SOURCE="litegapps-11-x86_64"
+      GAPPS_GRANT_DEVICE_CONFIG="0"
+      OVERLAY_REQUIRED="0"
+      ;;
+    redroid-android12)
+      ANDROID_VERSION="12"
+      SDK_VERSION="31"
+      REDROID_IMAGE="redroid/redroid:12.0.0-latest@sha256:52332b2d74f337982d5ac281a8020ec297fb1ea05cbdcdaaa9c19a2065ae1adc"
+      ;;
+    redroid-android13)
+      ANDROID_VERSION="13"
+      SDK_VERSION="33"
+      REDROID_BASE_IMAGE="redroid/redroid:13.0.0-latest@sha256:41e5f0c1ff27a4a474c474e5595168cedf6c40fc5dd102c5617f48c80f511e9e"
+      REDROID_IMAGE="local/redroid-13-gms:2026.08.19"
+      IMAGE_HAS_GMS="1"
+      GAPPS_FLAVOR="archive"
+      GAPPS_URL="https://github.com/MindTheGapps/13.0.0-x86_64/releases/download/MindTheGapps-13.0.0-x86_64-20231025_201203/MindTheGapps-13.0.0-x86_64-20231025_201203.zip"
+      GAPPS_SHA256="2076179bcb6f30e78853d52cf70a4bd1d27502c3852332195e5356816cddfdd9"
+      GAPPS_SOURCE="mindthegapps-13-x86_64"
+      ;;
+    redroid-android14)
+      ANDROID_VERSION="14"
+      SDK_VERSION="34"
+      REDROID_IMAGE="local/redroid-14-mtg:2026.08.19"
+      IMAGE_HAS_GMS="1"
+      GAPPS_FLAVOR="mindthegapps"
+      ;;
+    redroid-android15)
+      ANDROID_VERSION="15"
+      SDK_VERSION="35"
+      REDROID_IMAGE="local/redroid-15-gms:2026.08.19"
+      IMAGE_HAS_GMS="1"
+      GAPPS_FLAVOR="litegapps"
+      ;;
+    redroid-android7|redroid-android70)
+      die "Android 7 没有官方 Redroid 镜像；当前最早支持 redroid-android81"
+      ;;
+    redroid-android16)
+      die "redroid-android16 暂不支持：官方 x86_64 镜像在无 GPU 主机上会因 SurfaceFlinger 软件渲染缺陷无法完成启动"
+      ;;
+    *)
+      die "不支持容器名 $REDROID_CONTAINER；可选：redroid-android81、redroid-android11、redroid-android12、redroid-android13、redroid-android14、redroid-android15"
+      ;;
+  esac
+
+  REDROID_DATA_DIR="/var/lib/redroid/instances/android${ANDROID_VERSION//./}/data"
+  REDROID_ADB_PORT="$((15500 + SDK_VERSION))"
+}
+
+# 在修改系统和容器前验证内部配置，避免部署到一半才发现配置无效。
 validate_inputs() {
   [[ "$REDROID_CONTAINER" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
     || die "REDROID_CONTAINER 不是有效的 Docker 容器名"
@@ -218,24 +292,20 @@ validate_inputs() {
     || die "ANDROID_NETWORK 不是有效的 Docker 网络名"
   [[ "$BINDER_SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] \
     || die "BINDER_SERVICE_NAME 不是有效的 systemd 服务名"
-  [[ "$BINDER_SETUP_PATH" == /* && "$REDROID_STOP_PATH" == /* ]] \
-    || die "Binder 修复和 Redroid 停止脚本路径必须是绝对路径"
+  [[ "$BINDER_SETUP_PATH" == /* && "$REDROID_STOP_PATH" == /* \
+    && "$INSTANCE_REGISTRY_DIR" == /* ]] \
+    || die "Binder、Redroid 停止脚本和实例注册目录必须是绝对路径"
   [[ "$BOOT_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] \
     || die "BOOT_ATTEMPTS 必须是正整数"
   [[ "$ADB_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] \
     || die "ADB_ATTEMPTS 必须是正整数"
-  [[ "$REDROID_ADB_PORT" =~ ^[0-9]+$ ]] && (( REDROID_ADB_PORT >= 1 && REDROID_ADB_PORT <= 65535 )) \
-    || die "REDROID_ADB_PORT 必须是 1-65535"
-  # 默认保持原脚本行为，构建 ws-scrcpy 的 master；也可传完整 Commit 固定版本。
-  if ! container_exists "$WS_SCRCPY_CONTAINER"; then
-    [[ "$WS_SCRCPY_REF" == "master" || "$WS_SCRCPY_REF" =~ ^[0-9a-fA-F]{40}$ ]] \
-      || die "WS_SCRCPY_REF 必须是 master 或完整的 40 位 Git Commit"
+  if [[ ! "$REDROID_ADB_PORT" =~ ^[0-9]+$ ]] \
+    || (( REDROID_ADB_PORT < 1 || REDROID_ADB_PORT > 65535 )); then
+    die "REDROID_ADB_PORT 必须是 1-65535"
   fi
-
-  # 保持原脚本的开箱即用行为；使用浮动 tag 时提示风险但不阻断部署。
-  if ! container_exists "$REDROID_CONTAINER" \
-    && [[ "$ALLOW_MUTABLE_IMAGE" != "1" && "$REDROID_IMAGE" != *@sha256:* ]]; then
-    log "警告：REDROID_IMAGE 未固定 sha256，镜像 tag 后续可能变化：$REDROID_IMAGE"
+  if [[ ! "$WS_SCRCPY_PORT" =~ ^[0-9]+$ ]] \
+    || (( WS_SCRCPY_PORT < 1 || WS_SCRCPY_PORT > 65535 )); then
+    die "WS_SCRCPY_PORT 必须是 1-65535"
   fi
 }
 
@@ -256,30 +326,18 @@ network_is_healthy() {
   bridge="$(network_bridge_name)"
   gateway="$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$ANDROID_NETWORK")"
   ip link show "$bridge" >/dev/null 2>&1 || return 1
-  ip -4 address show dev "$bridge" | grep -Fq "${gateway}/" || return 1
+  ip -4 address show dev "$bridge" | grep -F "${gateway}/" >/dev/null || return 1
 }
 
-# 只允许自动重建本脚本专用的网络。若发现其他业务容器，停止并要求人工确认。
+# 网络上可能同时存在多个 Android 实例。异常网络只在没有容器引用时重建，
+# 避免为了部署一个新版本而中断已经运行的模拟器。
 recreate_android_network() {
-  local container attached_containers
+  local attached_containers
   attached_containers="$(docker network inspect -f '{{range .Containers}}{{println .Name}}{{end}}' "$ANDROID_NETWORK" 2>/dev/null || true)"
-  while IFS= read -r container; do
-    [[ -z "$container" ]] && continue
-    if [[ "$container" != "$REDROID_CONTAINER" && "$container" != "$WS_SCRCPY_CONTAINER" ]]; then
-      die "网络 $ANDROID_NETWORK 还连接了其他容器 $container，拒绝自动重建"
-    fi
-  done <<<"$attached_containers"
+  [[ -z "${attached_containers//[[:space:]]/}" ]] \
+    || die "网络 $ANDROID_NETWORK 异常但仍连接容器，拒绝重建以免中断现有模拟器：${attached_containers//$'\n'/, }"
 
-  log "Docker 网络 $ANDROID_NETWORK 的 bridge 或网关异常，正在安全重建"
-  for container in "$REDROID_CONTAINER" "$WS_SCRCPY_CONTAINER"; do
-    if container_exists "$container"; then
-      docker network disconnect -f "$ANDROID_NETWORK" "$container" >/dev/null 2>&1 || true
-      # 半创建网络可能只写入容器配置却未登记 endpoint；删除网络前确认引用已清除。
-      if docker inspect -f '{{json .NetworkSettings.Networks}}' "$container" | grep -q "\"$ANDROID_NETWORK\""; then
-        die "$container 仍引用异常网络 $ANDROID_NETWORK，拒绝删除网络以免留下失效 NetworkID"
-      fi
-    fi
-  done
+  log "Docker 网络 $ANDROID_NETWORK 的 bridge 或网关异常，且没有容器引用，正在重建"
   docker network rm "$ANDROID_NETWORK" >/dev/null 2>&1 || true
   docker network create --driver bridge "$ANDROID_NETWORK" >/dev/null
 
@@ -289,12 +347,6 @@ recreate_android_network() {
     sleep 0.5
   done
   network_is_healthy || die "Docker 网络 $ANDROID_NETWORK 重建后仍缺少 bridge 或网关路由"
-
-  for container in "$REDROID_CONTAINER" "$WS_SCRCPY_CONTAINER"; do
-    if container_exists "$container"; then
-      connect_network "$container"
-    fi
-  done
 }
 
 ensure_network() {
@@ -326,13 +378,12 @@ connect_network() {
   if ! docker network connect "$ANDROID_NETWORK" "$container"; then
     # 连接失败时重新检查一次，修复 Docker 的半创建网络后再连接。
     recreate_android_network
-    docker inspect -f '{{json .NetworkSettings.Networks}}' "$container" | grep -q "\"$ANDROID_NETWORK\"" \
+    docker inspect -f '{{json .NetworkSettings.Networks}}' "$container" | grep "\"$ANDROID_NETWORK\"" >/dev/null \
       || docker network connect "$ANDROID_NETWORK" "$container"
   fi
 }
 
-# 宿主机修复脚本供 systemd 使用：先检查，缺失时安装当前内核模块，
-# 最后加载 binder_linux 并验证实际设备。
+# 宿主机修复脚本供 systemd 使用：缺失时安装并加载 binder_linux。
 install_binder_setup_script() {
   install -d -m 0755 "$(dirname "$BINDER_SETUP_PATH")"
 
@@ -341,33 +392,10 @@ install_binder_setup_script() {
 set -Eeuo pipefail
 
 binder_is_ready() {
-  grep -qE '^[[:space:]]*nodev[[:space:]]+binder$' /proc/filesystems || return 1
-  if test -c /dev/binder && test -c /dev/hwbinder && test -c /dev/vndbinder; then
-    return 0
-  fi
-  test -c /dev/binderfs/binder \
-    && test -c /dev/binderfs/hwbinder \
-    && test -c /dev/binderfs/vndbinder
-}
-
-ensure_binder_devices() {
-  if test -c /dev/binder && test -c /dev/hwbinder && test -c /dev/vndbinder; then
-    return
-  fi
-  install -d -m 0755 /dev/binderfs
-  mountpoint -q /dev/binderfs || mount -t binder binder /dev/binderfs
-}
-
-set_binder_device_permissions() {
-  for device in \
-    /dev/binder /dev/hwbinder /dev/vndbinder \
-    /dev/binderfs/binder /dev/binderfs/hwbinder /dev/binderfs/vndbinder; do
-    test -c "$device" && chmod 0666 "$device"
-  done
+  grep -qE '^[[:space:]]*nodev[[:space:]]+binder$' /proc/filesystems
 }
 
 if binder_is_ready; then
-  set_binder_device_permissions
   exit 0
 fi
 
@@ -392,17 +420,8 @@ if ! modprobe binder_linux >/dev/null 2>&1; then
   modprobe binder_linux
 fi
 
-ensure_binder_devices
-set_binder_device_permissions
-for _ in {1..10}; do
-  binder_is_ready && exit 0
-  sleep 0.5
-done
-
 grep -qE '^[[:space:]]*nodev[[:space:]]+binder$' /proc/filesystems \
   || { echo "Binder 修复失败：BinderFS 未注册" >&2; exit 1; }
-binder_is_ready \
-  || { echo "Binder 修复失败：/dev/binder 和 /dev/binderfs 中都没有完整设备" >&2; exit 1; }
 EOF
   chmod 0755 "$BINDER_SETUP_PATH"
 }
@@ -433,39 +452,212 @@ EOF
 create_redroid_container() {
   local image="$1"
   local data_dir="$2"
-  local binder_device_dir="/dev"
-  if [[ ! -c /dev/binder || ! -c /dev/hwbinder || ! -c /dev/vndbinder ]]; then
-    binder_device_dir="/dev/binderfs"
-  fi
-  [[ -c "$binder_device_dir/binder" \
-    && -c "$binder_device_dir/hwbinder" \
-    && -c "$binder_device_dir/vndbinder" ]] \
-    || die "创建 Redroid 失败：宿主机 Binder 设备不完整"
   docker create \
     --name "$REDROID_CONTAINER" \
     --hostname "$REDROID_CONTAINER" \
     --privileged \
     --restart unless-stopped \
     --network "$ANDROID_NETWORK" \
+    --label "io.redroid.deploy.managed=true" \
+    --label "io.redroid.deploy.instance=android${ANDROID_VERSION}" \
+    --label "io.redroid.deploy.android-version=$ANDROID_VERSION" \
+    --label "io.redroid.deploy.sdk-version=$SDK_VERSION" \
     -p "127.0.0.1:${REDROID_ADB_PORT}:5555" \
-    --mount "type=bind,src=$binder_device_dir/binder,dst=/dev/binder" \
-    --mount "type=bind,src=$binder_device_dir/hwbinder,dst=/dev/hwbinder" \
-    --mount "type=bind,src=$binder_device_dir/vndbinder,dst=/dev/vndbinder" \
     -v "$data_dir:/data" \
     "$image" >/dev/null
 }
 
-# 安装redroid https://github.com/ERSTT/redroid/blob/main/README_CN.md
-install_redroid() {
-  if container_exists "$REDROID_CONTAINER"; then
-    log "停止并删除现有 $REDROID_CONTAINER 容器；宿主机 Android 数据目录保持不变"
-    "$REDROID_STOP_PATH" "$REDROID_CONTAINER" || true
-    docker rm -f "$REDROID_CONTAINER" >/dev/null
+# GMS 镜像不存在时，从本项目的固定构建输入自动制作。
+gapps_build_context() {
+  local build_context="$GAPPS_BUILD_CONTEXT"
+  local script_dir
+  if ! script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"; then
+    script_dir=""
+  fi
+  if [[ -f "$script_dir/../redroid-gapps/Dockerfile.android14" ]]; then
+    build_context="$script_dir/../redroid-gapps"
   fi
 
-  # /data 保存在宿主机，重建容器不会删除该目录中的应用和设置。
+  printf '%s\n' "$build_context"
+}
+
+build_gapps_archive_image() {
+  local build_context dockerfile
+  build_context="$(gapps_build_context)"
+  if [[ -d "$build_context" ]]; then
+    dockerfile="$build_context/Dockerfile.gapps-archive"
+  else
+    # For a Git URL build context, Docker resolves the file inside the context.
+    dockerfile="Dockerfile.gapps-archive"
+  fi
+  [[ -n "$REDROID_BASE_IMAGE" && -n "$GAPPS_URL" && -n "$GAPPS_SHA256" ]] \
+    || die "$REDROID_CONTAINER 的 GMS 构建输入不完整"
+
+  log "正在构建 Android $ANDROID_VERSION + GMS 镜像：$REDROID_IMAGE"
+  docker buildx build \
+    --platform linux/amd64 \
+    --file "$dockerfile" \
+    --load \
+    --build-arg "REDROID_BASE_IMAGE=$REDROID_BASE_IMAGE" \
+    --build-arg "GAPPS_URL=$GAPPS_URL" \
+    --build-arg "GAPPS_SHA256=$GAPPS_SHA256" \
+    --build-arg "GAPPS_API=$SDK_VERSION" \
+    --build-arg "GAPPS_SOURCE=$GAPPS_SOURCE" \
+    --build-arg "GAPPS_GRANT_DEVICE_CONFIG=$GAPPS_GRANT_DEVICE_CONFIG" \
+    --build-arg "OVERLAY_REQUIRED=$OVERLAY_REQUIRED" \
+    --tag "$REDROID_IMAGE" \
+    "$build_context"
+}
+
+build_android14_gms_image() {
+  local build_context dockerfile
+  build_context="$(gapps_build_context)"
+  if [[ -d "$build_context" ]]; then
+    dockerfile="$build_context/Dockerfile.android14"
+  else
+    dockerfile="Dockerfile.android14"
+  fi
+
+  log "首次部署 API 34，正在构建 Android 14 + GMS 镜像"
+  docker buildx build \
+    --platform linux/amd64 \
+    --file "$dockerfile" \
+    --load \
+    --tag "$REDROID_IMAGE" \
+    "$build_context"
+}
+
+build_android15_gms_image() {
+  local build_context dockerfile
+  build_context="$(gapps_build_context)"
+  if [[ -d "$build_context" ]]; then
+    dockerfile="$build_context/Dockerfile.android15"
+  else
+    # For a Git build context, Docker resolves this path inside the context.
+    dockerfile="Dockerfile.android15"
+  fi
+
+  if ! docker image inspect local/redroid-14-mtg:2026.08.19 >/dev/null 2>&1; then
+    local requested_image="$REDROID_IMAGE"
+    REDROID_IMAGE="local/redroid-14-mtg:2026.08.19"
+    build_android14_gms_image
+    REDROID_IMAGE="$requested_image"
+  fi
+
+  log "首次部署 API 35，正在构建 Android 15 + GMS 镜像"
+  docker buildx build \
+    --platform linux/amd64 \
+    --file "$dockerfile" \
+    --load \
+    --tag "$REDROID_IMAGE" \
+    "$build_context"
+}
+
+prepare_redroid_image() {
+  local gapps_commit image_arch archive_source
+  if docker image inspect "$REDROID_IMAGE" >/dev/null 2>&1; then
+    log "使用本地已有 Redroid 镜像：$REDROID_IMAGE"
+  elif [[ "$GAPPS_FLAVOR" == "archive" ]]; then
+    build_gapps_archive_image
+  elif [[ "$GAPPS_FLAVOR" == "mindthegapps" ]]; then
+    build_android14_gms_image
+  elif [[ "$GAPPS_FLAVOR" == "litegapps" ]]; then
+    build_android15_gms_image
+  else
+    log "本地没有 Redroid 镜像，正在拉取：$REDROID_IMAGE"
+    docker pull "$REDROID_IMAGE"
+  fi
+
+  if [[ "$GAPPS_FLAVOR" == "mindthegapps" ]]; then
+    gapps_commit="$(docker image inspect "$REDROID_IMAGE" \
+      --format '{{index .Config.Labels "io.redroid.gapps.mindthegapps.commit"}}')"
+    [[ -n "$gapps_commit" && "$gapps_commit" != "<no value>" ]] \
+      || die "API 34 镜像缺少 MindTheGapps 构建标签"
+  elif [[ "$GAPPS_FLAVOR" == "litegapps" ]]; then
+    [[ "$(docker image inspect "$REDROID_IMAGE" \
+      --format '{{index .Config.Labels "io.redroid.gapps.device-configurator"}}')" == "true" ]] \
+      || die "API 35 镜像缺少 Device Configurator 修复标签"
+    [[ "$(docker image inspect "$REDROID_IMAGE" \
+      --format '{{index .Config.Labels "io.redroid.docker-network"}}')" == "true" ]] \
+      || die "API 35 镜像缺少 Docker 网络修复标签"
+  elif [[ "$GAPPS_FLAVOR" == "archive" ]]; then
+    archive_source="$(docker image inspect "$REDROID_IMAGE" \
+      --format '{{index .Config.Labels "io.redroid.gapps.source"}}')"
+    [[ "$archive_source" == "$GAPPS_SOURCE" ]] \
+      || die "GMS 镜像来源不匹配：期望 $GAPPS_SOURCE，实际 $archive_source"
+  fi
+  image_arch="$(docker image inspect "$REDROID_IMAGE" --format '{{.Architecture}}')"
+  [[ "$image_arch" == "amd64" ]] \
+    || die "服务器部署只支持 amd64 镜像，实际为 $image_arch"
+}
+
+container_data_dir() {
+  docker inspect "$1" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}'
+}
+
+container_adb_port() {
+  docker port "$1" 5555/tcp 2>/dev/null \
+    | awk -F: '$1 == "127.0.0.1" { print $NF; exit }' \
+    || true
+}
+
+existing_instance_matches() {
+  local actual_image actual_image_id expected_image_id actual_data_dir actual_adb_port
+  actual_image="$(docker inspect -f '{{.Config.Image}}' "$REDROID_CONTAINER")"
+  actual_image_id="$(docker inspect -f '{{.Image}}' "$REDROID_CONTAINER")"
+  expected_image_id="$(docker image inspect -f '{{.Id}}' "$REDROID_IMAGE")"
+  actual_data_dir="$(container_data_dir "$REDROID_CONTAINER")"
+  actual_adb_port="$(container_adb_port "$REDROID_CONTAINER")"
+
+  [[ "$actual_image" == "$REDROID_IMAGE" ]] \
+    && [[ "$actual_image_id" == "$expected_image_id" ]] \
+    && [[ "$(readlink -m "$actual_data_dir")" == "$(readlink -m "$REDROID_DATA_DIR")" ]] \
+    && [[ "$actual_adb_port" == "$REDROID_ADB_PORT" ]]
+}
+
+ensure_instance_resources_are_unique() {
+  local other other_data_dir reserved_port
+
+  while IFS= read -r other; do
+    [[ -z "$other" || "$other" == "$REDROID_CONTAINER" ]] && continue
+    reserved_port="$(container_adb_port "$other")"
+    [[ "$reserved_port" != "$REDROID_ADB_PORT" ]] \
+      || die "固定 ADB 端口 $REDROID_ADB_PORT 已被容器 $other 占用"
+    other_data_dir="$(container_data_dir "$other")"
+    if [[ -n "$other_data_dir" \
+      && "$(readlink -m "$other_data_dir")" == "$(readlink -m "$REDROID_DATA_DIR")" ]]; then
+      die "数据目录 $REDROID_DATA_DIR 已被容器 $other 使用，不同实例禁止共用 /data"
+    fi
+  done < <(docker ps -a --format '{{.Names}}')
+
+  if ! container_exists "$REDROID_CONTAINER" \
+    && ss -H -ltn | awk -v port="$REDROID_ADB_PORT" '
+      { count=split($4, address, ":") }
+      address[count] == port { found=1 }
+      END { exit !found }
+    '; then
+    die "固定 ADB 端口 $REDROID_ADB_PORT 已被宿主机其他进程占用"
+  fi
+}
+
+# 已存在且配置一致的实例原样复用，不执行 restart。配置不一致时直接失败，
+# 脚本不提供自动替换开关，避免误删正在使用的模拟器。
+install_redroid() {
+  prepare_redroid_image
+  ensure_instance_resources_are_unique
+
+  if container_exists "$REDROID_CONTAINER"; then
+    if existing_instance_matches; then
+      log "复用现有实例 $REDROID_CONTAINER；不会重建或重启"
+      connect_network "$REDROID_CONTAINER"
+      return
+    fi
+
+    die "$REDROID_CONTAINER 已存在但镜像版本、数据目录或固定 ADB 端口不一致；脚本拒绝自动替换，请人工确认后删除该容器再重试"
+  fi
+
+  # /data 保存在实例专属目录，重建容器不会删除应用和设置。
   install -d -m 0755 "$REDROID_DATA_DIR"
-  docker pull "$REDROID_IMAGE"
   create_redroid_container "$REDROID_IMAGE" "$REDROID_DATA_DIR"
 }
 
@@ -499,41 +691,10 @@ EOF
   systemctl enable "$BINDER_SERVICE_NAME"
   systemctl restart "$BINDER_SERVICE_NAME"
   docker update --restart=unless-stopped "$REDROID_CONTAINER" >/dev/null
-  docker start "$REDROID_CONTAINER" >/dev/null
-}
-
-# darknightlab/redroid-14-gms 的 Google APK 被打包为 0777。Android 14
-# 会拒绝加载当前进程可写的 dex，因此必须在首次启动后修正容器可写层。
-fix_redroid_gms_apk_permissions() {
-  local apk mode
-  local changed=0
-  local gms_apks=(
-    /system/app/GoogleCalendarSyncAdapter/GoogleCalendarSyncAdapter.apk
-    /system/app/GoogleContactsSyncAdapter/GoogleContactsSyncAdapter.apk
-    /system/priv-app/GmsCore/GmsCore.apk
-    /system/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk
-    /system/priv-app/Phonesky/Phonesky.apk
-  )
-
-  for apk in "${gms_apks[@]}"; do
-    if ! docker exec "$REDROID_CONTAINER" test -f "$apk"; then
-      log "警告：镜像中不存在预期的 GMS APK：$apk"
-      continue
-    fi
-
-    mode="$(docker exec "$REDROID_CONTAINER" stat -c '%a' "$apk")"
-    if [[ "$mode" != "644" && "$mode" != "0644" ]]; then
-      log "修复 GMS APK 权限：$apk（$mode -> 644）"
-      docker exec "$REDROID_CONTAINER" chmod 0644 "$apk"
-      changed=1
-    fi
-  done
-
-  if (( changed )); then
-    log "GMS APK 权限已修复，重启 Redroid 使 Android 重新扫描系统应用"
-    docker restart --time 30 "$REDROID_CONTAINER" >/dev/null
+  if container_running "$REDROID_CONTAINER"; then
+    log "$REDROID_CONTAINER 已在运行，不执行重启"
   else
-    log "GMS APK 权限已符合 Android 14 要求"
+    docker start "$REDROID_CONTAINER" >/dev/null
   fi
 }
 
@@ -557,6 +718,60 @@ wait_for_redroid_boot() {
 
   "$REDROID_STOP_PATH" "$REDROID_CONTAINER" || true
   die "Redroid 未在限定时间内完成启动，已安全停止；请查看 docker logs $REDROID_CONTAINER"
+}
+
+# 自定义镜像必须在构建阶段完成 APK 权限和 Overlay 修复；部署阶段只验证，
+# 不再修改容器系统分区，也不会为了修权限而重启 Android。
+verify_redroid_release() {
+  local actual_sdk actual_release i
+  actual_sdk="$(docker exec "$REDROID_CONTAINER" getprop ro.build.version.sdk)"
+  actual_release="$(docker exec "$REDROID_CONTAINER" getprop ro.build.version.release)"
+  [[ "$actual_sdk" == "$SDK_VERSION" ]] \
+    || die "$REDROID_CONTAINER 的 API Level 为 $actual_sdk，预期为 $SDK_VERSION"
+  log "系统版本验证通过：Android $actual_release / API $actual_sdk"
+
+  if [[ "$IMAGE_HAS_GMS" != "1" ]]; then
+    log "API $SDK_VERSION 使用官方 AOSP 镜像，本版本不安装 GMS"
+    return
+  fi
+
+  local package
+  local packages=(
+    com.google.android.gms
+    com.android.vending
+    com.google.android.gsf
+  )
+
+  for package in "${packages[@]}"; do
+    docker exec "$REDROID_CONTAINER" sh -c \
+      'export PATH=/system/bin:$PATH; cmd package list packages' \
+      | grep -Fx "package:$package" >/dev/null \
+      || die "$REDROID_CONTAINER 缺少系统包 $package"
+  done
+
+  if (( SDK_VERSION >= 33 )); then
+    for ((i=1; i<=30; i++)); do
+      if docker exec "$REDROID_CONTAINER" dumpsys package com.google.android.gms \
+        | grep -F 'android.permission.WRITE_DEVICE_CONFIG: granted=true' >/dev/null; then
+        break
+      fi
+      sleep 3
+    done
+    (( i <= 30 )) \
+      || die "$REDROID_CONTAINER 中 Google Play services 未在限定时间内获得 WRITE_DEVICE_CONFIG"
+
+    docker exec "$REDROID_CONTAINER" logcat -b all -c >/dev/null 2>&1 || true
+    sleep 5
+    if docker exec "$REDROID_CONTAINER" logcat -b all -d -v brief \
+      | grep -E 'Permission denial to mutate flag|must have root, WRITE_DEVICE_CONFIG|setAllConfigSettings' >/dev/null; then
+      die "$REDROID_CONTAINER 仍出现 DeviceConfig 权限拒绝"
+    fi
+  fi
+  if (( SDK_VERSION >= 33 )); then
+    log "GApps 与 WRITE_DEVICE_CONFIG 验证通过"
+  else
+    log "GApps 包验证通过"
+  fi
 }
 
 # 手动打包ws-scrcpy镜像，Docker仓库里的版本通常较旧。
@@ -589,32 +804,27 @@ EOF
     "$build_dir"
 )
 
-# 安装ws-scrcpy，直接将容器 8000 映射到公网固定端口 8000。
+# 安装 ws-scrcpy。已有容器只连接共享网络，不重建、不重启。
 install_ws_scrcpy() {
   if container_exists "$WS_SCRCPY_CONTAINER"; then
-    local expected_binding="0.0.0.0:8000"
-    if docker port "$WS_SCRCPY_CONTAINER" 8000/tcp 2>/dev/null | grep -Fxq "$expected_binding"; then
-      log "$WS_SCRCPY_CONTAINER 已使用本机后端端口"
-      connect_network "$WS_SCRCPY_CONTAINER"
-      docker start "$WS_SCRCPY_CONTAINER" >/dev/null || true
-      return
+    docker port "$WS_SCRCPY_CONTAINER" 8000/tcp 2>/dev/null \
+      | grep -E "^(0\\.0\\.0\\.0|\\[::\\]):${WS_SCRCPY_PORT}$" >/dev/null \
+      || die "$WS_SCRCPY_CONTAINER 已存在但未使用固定端口 $WS_SCRCPY_PORT；脚本拒绝自动重建"
+    connect_network "$WS_SCRCPY_CONTAINER"
+    if container_running "$WS_SCRCPY_CONTAINER"; then
+      log "$WS_SCRCPY_CONTAINER 已在运行，不执行重启"
+    else
+      docker start "$WS_SCRCPY_CONTAINER" >/dev/null
     fi
-
-    # ws-scrcpy 本身无状态。若用户额外挂载了数据则拒绝自动删除。
-    [[ "$(docker inspect -f '{{len .Mounts}}' "$WS_SCRCPY_CONTAINER")" == "0" ]] \
-      || die "$WS_SCRCPY_CONTAINER 使用了数据挂载，无法自动重建端口绑定"
-    local current_image
-    current_image="$(docker inspect -f '{{.Config.Image}}' "$WS_SCRCPY_CONTAINER")"
-    log "停止旧 ws-scrcpy，并迁移到公网 8000 端口"
-    docker rm -f "$WS_SCRCPY_CONTAINER" >/dev/null
-    docker run -d \
-      --name "$WS_SCRCPY_CONTAINER" \
-      --hostname "$WS_SCRCPY_CONTAINER" \
-      --restart unless-stopped \
-      --network "$ANDROID_NETWORK" \
-      -p "8000:8000" \
-      "$current_image" >/dev/null
     return
+  fi
+
+  if ss -H -ltn | awk -v port="$WS_SCRCPY_PORT" '
+    { count=split($4, address, ":") }
+    address[count] == port { found=1 }
+    END { exit !found }
+  '; then
+    die "ws-scrcpy 固定端口 $WS_SCRCPY_PORT 已被宿主机其他进程占用"
   fi
 
   build_ws_scrcpy
@@ -623,60 +833,77 @@ install_ws_scrcpy() {
     --hostname "$WS_SCRCPY_CONTAINER" \
     --restart unless-stopped \
     --network "$ANDROID_NETWORK" \
-    -p "8000:8000" \
+    -p "${WS_SCRCPY_PORT}:8000" \
     "ws-scrcpy:${WS_SCRCPY_REF}" >/dev/null
 }
 
-# 配置ws-scrcpy自动连接模拟器。
-# 先等待 sys.boot_completed=1，不能只根据 Docker 容器显示 Up 判断 Android 可用。
+# 将当前实例加入共享设备列表。每个版本各有一个登记文件。
+register_redroid_instance() {
+  install -d -m 0755 "$INSTANCE_REGISTRY_DIR"
+  printf '%s\n' "$REDROID_CONTAINER" \
+    >"$INSTANCE_REGISTRY_DIR/$REDROID_CONTAINER.container"
+}
+
+# 配置 ws-scrcpy 自动连接全部已登记模拟器。
 configure_ws_scrcpy_auto_connect() {
-  # 写入实际执行 ADB 连接的脚本。
   cat >/usr/local/bin/redroid-adb-connect <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
-REDROID_CONTAINER="$REDROID_CONTAINER"
 WS_SCRCPY_CONTAINER="$WS_SCRCPY_CONTAINER"
-ADB_TARGET="$REDROID_CONTAINER:5555"
+INSTANCE_REGISTRY_DIR="$INSTANCE_REGISTRY_DIR"
 BOOT_ATTEMPTS="$BOOT_ATTEMPTS"
 ADB_ATTEMPTS="$ADB_ATTEMPTS"
 
 log() { printf '%s %s\\n' "\$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "\$*"; }
 
-# 等待 Redroid 容器运行且 Android Framework 完成启动。
-for ((i=1; i<=BOOT_ATTEMPTS; i++)); do
-  if [[ "\$(docker inspect -f '{{.State.Running}}' "\$REDROID_CONTAINER" 2>/dev/null || true)" == "true" ]] \
-    && [[ "\$(timeout 5s docker exec "\$REDROID_CONTAINER" getprop sys.boot_completed 2>/dev/null || true)" == "1" ]]; then
-    log "Redroid 已完成启动"
-    break
+[[ "\$(docker inspect -f '{{.State.Running}}' "\$WS_SCRCPY_CONTAINER" 2>/dev/null || true)" == "true" ]] \
+  || docker start "\$WS_SCRCPY_CONTAINER" >/dev/null
+
+shopt -s nullglob
+registrations=("\$INSTANCE_REGISTRY_DIR"/*.container)
+(( \${#registrations[@]} > 0 )) || { log "没有已登记的 Redroid 实例"; exit 0; }
+
+failed=0
+for registration in "\${registrations[@]}"; do
+  read -r redroid_container <"\$registration"
+  [[ "\$redroid_container" =~ ^redroid-android[0-9]+$ ]] \
+    || { log "忽略无效登记：\$registration"; continue; }
+  docker inspect "\$redroid_container" >/dev/null 2>&1 \
+    || { log "忽略不存在的容器：\$redroid_container"; continue; }
+
+  for ((i=1; i<=BOOT_ATTEMPTS; i++)); do
+    if [[ "\$(docker inspect -f '{{.State.Running}}' "\$redroid_container" 2>/dev/null || true)" == "true" ]] \
+      && [[ "\$(timeout 5s docker exec "\$redroid_container" getprop sys.boot_completed 2>/dev/null || true)" == "1" ]]; then
+      break
+    fi
+    sleep 5
+  done
+
+  adb_target="\$redroid_container:5555"
+  docker exec "\$WS_SCRCPY_CONTAINER" adb disconnect "\$adb_target" >/dev/null 2>&1 || true
+  for ((i=1; i<=ADB_ATTEMPTS; i++)); do
+    timeout --kill-after=2s 15s docker exec "\$WS_SCRCPY_CONTAINER" adb connect "\$adb_target" >/dev/null 2>&1 || true
+    if timeout --kill-after=2s 10s docker exec "\$WS_SCRCPY_CONTAINER" adb devices \
+      | awk -v target="\$adb_target" '\$1 == target && \$2 == "device" { found=1 } END { exit !found }'; then
+      log "ADB 已连接：\$adb_target"
+      break
+    fi
+    sleep 3
+  done
+
+  if (( i > ADB_ATTEMPTS )); then
+    log "ADB 连接失败：\$adb_target"
+    failed=1
   fi
-  (( i == BOOT_ATTEMPTS )) && { log "Redroid 未在限定时间内完成启动"; exit 1; }
-  sleep 5
 done
 
-# 使用 Docker DNS 名称连接，不使用会变化的容器 IP。
-docker start "\$WS_SCRCPY_CONTAINER" >/dev/null || true
-for ((i=1; i<=ADB_ATTEMPTS; i++)); do
-  log "第 \$i 次连接 \$ADB_TARGET"
-  timeout 15s docker exec "\$WS_SCRCPY_CONTAINER" adb connect "\$ADB_TARGET" || true
-
-  # adb devices 中只有状态为 device 才算成功，offline/unauthorized 均继续重试。
-  if timeout 10s docker exec "\$WS_SCRCPY_CONTAINER" adb devices \
-    | awk -v target="\$ADB_TARGET" '\$1 == target && \$2 == "device" { found=1 } END { exit !found }'; then
-    log "ADB 已连接：\$ADB_TARGET"
-    exit 0
-  fi
-  sleep 3
-done
-
-log "ADB 在限定次数内未连接成功"
-exit 1
+exit "\$failed"
 EOF
   chmod 0755 /usr/local/bin/redroid-adb-connect
 
-  # 创建 systemd 服务。失败时有限重试，避免原脚本连续重试三小时刷日志。
   cat >/etc/systemd/system/redroid-adb-connect.service <<EOF
 [Unit]
-Description=Connect ws-scrcpy to Redroid after Android boots
+Description=Connect ws-scrcpy to all registered Redroid instances
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target
@@ -694,15 +921,17 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  # oneshot 服务内部可能等待 Android/ADB 数分钟；后台启动，避免部署脚本看起来卡住。
   systemctl enable redroid-adb-connect.service
+  systemctl reset-failed redroid-adb-connect.service >/dev/null 2>&1 || true
   systemctl restart --no-block redroid-adb-connect.service
-  log "ADB 自动连接已在后台启动；查看进度：journalctl -fu redroid-adb-connect.service"
+  log "ws-scrcpy 正在后台连接所有已登记模拟器"
 }
 
 main() {
   local server_ip
   log "deploy_redroid_ws_scrcpy 版本：$SCRIPT_VERSION"
+  select_release "$@"
+  log "目标版本：Android $ANDROID_VERSION / API $SDK_VERSION"
   validate_inputs
   install_docker
   install_binder_linux
@@ -712,16 +941,17 @@ main() {
   ensure_network
   install_redroid
   configure_binder_startup
-  fix_redroid_gms_apk_permissions
   wait_for_redroid_boot
+  verify_redroid_release
   install_ws_scrcpy
+  register_redroid_instance
   configure_ws_scrcpy_auto_connect
 
   server_ip="$(detect_server_ip)"
-  log "redroid安卓模拟器部署完成"
-  log "浏览器打开 http://${server_ip}:8000"
+  log "$REDROID_CONTAINER 部署完成"
+  log "浏览器打开 http://${server_ip}:${WS_SCRCPY_PORT}"
   log "ADB 仅绑定本机：127.0.0.1:${REDROID_ADB_PORT}"
-  log "如果打不开，请检查云安全组和主机防火墙是否开放 TCP 8000"
+  log "如果打不开，请检查云安全组和主机防火墙是否开放 TCP ${WS_SCRCPY_PORT}"
 }
 
 main "$@"

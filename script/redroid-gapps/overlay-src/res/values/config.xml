@@ -1,0 +1,3 @@
+<resources>
+  <string name="config_deviceConfiguratorPackageName" translatable="false">com.google.android.gms</string>
+</resources>

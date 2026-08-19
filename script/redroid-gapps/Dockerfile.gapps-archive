@@ -1,0 +1,110 @@
+# syntax=docker/dockerfile:1.7
+
+ARG REDROID_BASE_IMAGE
+
+FROM ${REDROID_BASE_IMAGE} AS redroid-base
+
+FROM --platform=linux/amd64 ubuntu:24.04 AS gapps-builder
+
+ARG GAPPS_URL
+ARG GAPPS_SHA256
+ARG GAPPS_API
+ARG GAPPS_GRANT_DEVICE_CONFIG=1
+ARG OVERLAY_REQUIRED=1
+ARG AAPT2_URL=https://dl.google.com/android/repository/build-tools_r35_linux.zip
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        busybox-static \
+        ca-certificates \
+        curl \
+        libxml2-utils \
+        unzip \
+        xmlstarlet \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fL --retry 5 --retry-all-errors --connect-timeout 20 \
+      "$AAPT2_URL" -o /tmp/build-tools.zip \
+    && unzip -q -j /tmp/build-tools.zip '*/aapt2' -d /usr/local/bin \
+    && chmod 0755 /usr/local/bin/aapt2 \
+    && rm /tmp/build-tools.zip
+
+COPY --from=redroid-base /system/framework/framework-res.apk /tmp/framework-res.apk
+COPY overlay-src/ /tmp/overlay-src/
+
+RUN test -n "$GAPPS_URL" \
+    && test -n "$GAPPS_SHA256" \
+    && test -n "$GAPPS_API" \
+    && curl -fL --retry 5 --retry-all-errors --connect-timeout 20 \
+        "$GAPPS_URL" -o /tmp/gapps.zip \
+    && echo "$GAPPS_SHA256  /tmp/gapps.zip" | sha256sum -c - \
+    && mkdir -p /tmp/unpacked /staging/system \
+    && unzip -q /tmp/gapps.zip -d /tmp/unpacked \
+    && if test -d /tmp/unpacked/system; then \
+         cp -a /tmp/unpacked/system/. /staging/system/; \
+       else \
+         payload="$(find /tmp/unpacked -type f -name files.tar.xz -print -quit)"; \
+         test -n "$payload"; \
+         mkdir -p /tmp/payload; \
+         tar -xJf "$payload" -C /tmp/payload; \
+         system_dir="$(find /tmp/payload -type d -path "*/${GAPPS_API}/system" -print -quit)"; \
+         test -n "$system_dir"; \
+         cp -a "$system_dir"/. /staging/system/; \
+       fi \
+    && rm -rf /staging/system/addon.d \
+    && if test "$OVERLAY_REQUIRED" = 1; then \
+         mkdir -p /staging/system/product/overlay; \
+         aapt2 compile --dir /tmp/overlay-src/res -o /tmp/overlay.flata; \
+         aapt2 link -o /staging/system/product/overlay/GmsOverlay.apk \
+           --manifest /tmp/overlay-src/AndroidManifest.xml \
+           -I /tmp/framework-res.apk --auto-add-overlay /tmp/overlay.flata; \
+       fi \
+    && if test "$GAPPS_GRANT_DEVICE_CONFIG" = 1; then \
+         permissions_file="$(find /staging/system -type f -name 'privapp-permissions-google*.xml' \
+           -exec grep -l 'package="com.google.android.gms"' {} + | head -1)"; \
+         test -n "$permissions_file"; \
+         if ! grep -q 'android.permission.WRITE_DEVICE_CONFIG' "$permissions_file"; then \
+           xmlstarlet ed -L \
+             -s '/permissions/privapp-permissions[@package="com.google.android.gms"]' \
+             -t elem -n permission -v '' \
+             -i '/permissions/privapp-permissions[@package="com.google.android.gms"]/permission[last()]' \
+             -t attr -n name -v 'android.permission.WRITE_DEVICE_CONFIG' \
+             "$permissions_file"; \
+         fi; \
+         grep -q 'android.permission.WRITE_DEVICE_CONFIG' "$permissions_file"; \
+       fi \
+    && find /staging/system -type d -exec chmod 0755 {} + \
+    && find /staging/system -type f -exec chmod 0644 {} + \
+    && chown -R 0:0 /staging/system \
+    && find /staging/system -type f \( \
+         -path '*/GmsCore/GmsCore.apk' -o \
+         -path '*/Phonesky/Phonesky.apk' -o \
+         -path '*/GoogleServicesFramework/GoogleServicesFramework.apk' \
+       \) | grep -q .
+
+FROM --platform=$TARGETPLATFORM ${REDROID_BASE_IMAGE}
+
+ARG REDROID_BASE_IMAGE
+ARG GAPPS_URL
+ARG GAPPS_SHA256
+ARG GAPPS_API
+ARG GAPPS_SOURCE
+ARG GAPPS_GRANT_DEVICE_CONFIG=1
+ARG OVERLAY_REQUIRED=1
+
+LABEL org.opencontainers.image.title="Redroid Android with GApps" \
+      org.opencontainers.image.description="Pinned GApps archive layered on the matching official Redroid image" \
+      io.redroid.gapps.source="$GAPPS_SOURCE" \
+      io.redroid.gapps.archive.url="$GAPPS_URL" \
+      io.redroid.gapps.archive.sha256="$GAPPS_SHA256" \
+      io.redroid.gapps.api="$GAPPS_API" \
+      io.redroid.gapps.device-config-permission="$GAPPS_GRANT_DEVICE_CONFIG" \
+      io.redroid.gapps.redroid-base="$REDROID_BASE_IMAGE"
+
+COPY --from=gapps-builder /staging/system/ /system/
+COPY --from=gapps-builder /usr/bin/busybox /tmp/busybox
+
+# Google SetupWizard replaces AOSP Provision. The package location differs
+# between Android releases, so remove both flattened partition variants.
+RUN ["/tmp/busybox", "sh", "-c", "rm -rf /system/priv-app/Provision /system/system_ext/priv-app/Provision && find /system -type f -path '*/GmsCore/GmsCore.apk' | grep -q . && find /system -type f -path '*/Phonesky/Phonesky.apk' | grep -q . && find /system -type f -path '*/GoogleServicesFramework/GoogleServicesFramework.apk' | grep -q . && rm /tmp/busybox"]

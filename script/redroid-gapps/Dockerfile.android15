@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1.7
+
+ARG ANDROID14_GMS_IMAGE=local/redroid-14-mtg:2026.08.19
+ARG ANDROID15_GMS_BASE=ghcr.io/cocoonstack/cocoon/android:15.0-gms@sha256:7bc0ded014ee57e32b3bd752f194de392ddfdf7172300d3f219649710d572df4
+
+FROM ${ANDROID14_GMS_IMAGE} AS device-configurator-overlay
+FROM ${ANDROID15_GMS_BASE}
+
+ARG ANDROID15_GMS_BASE
+
+# LiteGapps supplies GMS for x86_64. The patched resource-only overlay selects
+# Google Play services as Android's device configurator, granting DeviceConfig
+# writes without modifying the running container or restarting Android.
+COPY --from=device-configurator-overlay \
+  /system/product/overlay/GmsOverlay.apk \
+  /system/product/overlay/GmsOverlay.apk
+
+# Cocoon's image is also designed for direct VM boot. Its late-start network
+# hook removes eth0's existing IPv4 address and waits for DHCP, which is correct
+# in a Cocoon VM but breaks Docker bridge networking because Docker configures a
+# static address and does not run a DHCP server. Keep the hook harmless here.
+COPY --chmod=0755 cocoon-network-fix.sh \
+  /system/bin/cocoon-network.sh
+
+LABEL org.opencontainers.image.title="Redroid 15 with LiteGapps" \
+      org.opencontainers.image.description="Redroid Android 15 x86_64 with LiteGapps and DeviceConfig permission fix" \
+      io.redroid.gapps.source="LiteGapps" \
+      io.redroid.gapps.device-configurator="true" \
+      io.redroid.docker-network="true" \
+      io.redroid.gapps.redroid-base="$ANDROID15_GMS_BASE"
