@@ -5,12 +5,12 @@ scripts=(
     [0]="Linux配置远程桌面环境|install_desktop.sh|"
     [1]="Linux安装或更新Android Studio|install_android_studio.sh|"
     [2]="Linux配置Android SDK开发环境|install_android_env.sh|"
-    [3]="Linux安装 Redroid Android 15 / API 35 / GMS（默认模拟器）|deploy_redroid.sh|redroid-android15"
-    [4]="Linux安装 Redroid Android 14 / API 34 / GMS|deploy_redroid.sh|redroid-android14"
-    [5]="Linux安装 Redroid Android 13 / API 33 / GMS|deploy_redroid.sh|redroid-android13"
-    [6]="Linux安装 Redroid Android 12 / API 31 / AOSP|deploy_redroid.sh|redroid-android12"
-    [7]="Linux安装 Redroid Android 11 / API 30 / GMS|deploy_redroid.sh|redroid-android11"
-    [8]="Linux安装 Redroid Android 8.1 / API 27 / GMS|deploy_redroid.sh|redroid-android81"
+    [3]="Linux安装 Redroid Android 15 / API 35 / GMS（默认模拟器）|deploy_redroid.sh|redroid-api35"
+    [4]="Linux安装 Redroid Android 14 / API 34 / GMS|deploy_redroid.sh|redroid-api34"
+    [5]="Linux安装 Redroid Android 13 / API 33 / GMS|deploy_redroid.sh|redroid-api33"
+    [6]="Linux安装 Redroid Android 12 / API 31 / AOSP|deploy_redroid.sh|redroid-api31"
+    [7]="Linux安装 Redroid Android 11 / API 30 / GMS|deploy_redroid.sh|redroid-api30"
+    [8]="Linux安装 Redroid Android 8.1 / API 27 / GMS|deploy_redroid.sh|redroid-api27"
 )
 
 # 输入 all 时只执行这些菜单项：远程桌面、Android Studio、Android SDK，

@@ -7,11 +7,11 @@ set -Eeuo pipefail
 #   浏览器 :8000 -> ws-scrcpy
 #
 # ADB 访问链路：
-#   ws-scrcpy -> Docker 内网 -> redroid-androidXX:5555
+#   ws-scrcpy -> Docker 内网 -> redroid-apiXX:5555
 #   本地客户端 -> SSH 隧道 -> 127.0.0.1:15500+API Level
 #
 # 脚本自身版本，仅用于日志和排查，不影响 Redroid 或 Android 版本。
-SCRIPT_VERSION="2026.08.19.5"
+SCRIPT_VERSION="2026.08.25.1"
 
 # 唯一部署参数是规范容器名。不传参数时显示交互菜单。
 REDROID_CONTAINER="${1:-}"
@@ -179,26 +179,26 @@ install_binder_linux() {
 # 无参数运行时从真实终端读取选择，兼容 curl | sudo bash 的调用方式。
 choose_release_interactively() {
   local selection
-  [[ -r /dev/tty ]] || die "无交互终端，请传入容器名，例如：$0 redroid-android15"
+  [[ -r /dev/tty ]] || die "无交互终端，请传入容器名，例如：$0 redroid-api35"
   cat >/dev/tty <<'EOF'
 请选择要部署的 Android 系统：
-  1) redroid-android81 / Android 8.1 / API 27 / GMS
-  2) redroid-android11 / Android 11  / API 30 / GMS
-  3) redroid-android12 / Android 12  / API 31 / AOSP
-  4) redroid-android13 / Android 13  / API 33 / GMS
-  5) redroid-android14 / Android 14  / API 34 / GMS
-  6) redroid-android15 / Android 15  / API 35 / GMS
+  1) redroid-api27 / Android 8.1 / API 27 / GMS
+  2) redroid-api30 / Android 11  / API 30 / GMS
+  3) redroid-api31 / Android 12  / API 31 / AOSP
+  4) redroid-api33 / Android 13  / API 33 / GMS
+  5) redroid-api34 / Android 14  / API 34 / GMS
+  6) redroid-api35 / Android 15  / API 35 / GMS
 输入序号或容器名：
 EOF
   read -r selection </dev/tty
   case "$selection" in
-    1) REDROID_CONTAINER="redroid-android81" ;;
-    2) REDROID_CONTAINER="redroid-android11" ;;
-    3) REDROID_CONTAINER="redroid-android12" ;;
-    4) REDROID_CONTAINER="redroid-android13" ;;
-    5) REDROID_CONTAINER="redroid-android14" ;;
-    6) REDROID_CONTAINER="redroid-android15" ;;
-    redroid-android81|redroid-android11|redroid-android12|redroid-android13|redroid-android14|redroid-android15)
+    1) REDROID_CONTAINER="redroid-api27" ;;
+    2) REDROID_CONTAINER="redroid-api30" ;;
+    3) REDROID_CONTAINER="redroid-api31" ;;
+    4) REDROID_CONTAINER="redroid-api33" ;;
+    5) REDROID_CONTAINER="redroid-api34" ;;
+    6) REDROID_CONTAINER="redroid-api35" ;;
+    redroid-api27|redroid-api30|redroid-api31|redroid-api33|redroid-api34|redroid-api35)
       REDROID_CONTAINER="$selection"
       ;;
     *) die "无效选择：$selection" ;;
@@ -207,11 +207,11 @@ EOF
 
 # 根据规范容器名选择经过验证的系统版本、API Level 和固定镜像。
 select_release() {
-  (( $# <= 1 )) || die "只接受一个可选参数：规范容器名，例如 $0 redroid-android15"
+  (( $# <= 1 )) || die "只接受一个可选参数：规范容器名，例如 $0 redroid-api35"
   [[ -n "$REDROID_CONTAINER" ]] || choose_release_interactively
 
   case "$REDROID_CONTAINER" in
-    redroid-android81)
+    redroid-api27)
       ANDROID_VERSION="8.1"
       SDK_VERSION="27"
       REDROID_BASE_IMAGE="redroid/redroid:8.1.0-latest@sha256:ad6fd8ec7d9cdbc6856e0f3bd51ed06ebdde3d76ecbc71e886ed4314c3e9bfda"
@@ -224,7 +224,7 @@ select_release() {
       GAPPS_GRANT_DEVICE_CONFIG="0"
       OVERLAY_REQUIRED="0"
       ;;
-    redroid-android11)
+    redroid-api30)
       ANDROID_VERSION="11"
       SDK_VERSION="30"
       REDROID_BASE_IMAGE="redroid/redroid:11.0.0-latest@sha256:60b0810684be4578733a847be3314c50b70f73bc92405b5a627ebe9b633ebb5e"
@@ -237,12 +237,12 @@ select_release() {
       GAPPS_GRANT_DEVICE_CONFIG="0"
       OVERLAY_REQUIRED="0"
       ;;
-    redroid-android12)
+    redroid-api31)
       ANDROID_VERSION="12"
       SDK_VERSION="31"
       REDROID_IMAGE="redroid/redroid:12.0.0-latest@sha256:52332b2d74f337982d5ac281a8020ec297fb1ea05cbdcdaaa9c19a2065ae1adc"
       ;;
-    redroid-android13)
+    redroid-api33)
       ANDROID_VERSION="13"
       SDK_VERSION="33"
       REDROID_BASE_IMAGE="redroid/redroid:13.0.0-latest@sha256:41e5f0c1ff27a4a474c474e5595168cedf6c40fc5dd102c5617f48c80f511e9e"
@@ -253,14 +253,14 @@ select_release() {
       GAPPS_SHA256="2076179bcb6f30e78853d52cf70a4bd1d27502c3852332195e5356816cddfdd9"
       GAPPS_SOURCE="mindthegapps-13-x86_64"
       ;;
-    redroid-android14)
+    redroid-api34)
       ANDROID_VERSION="14"
       SDK_VERSION="34"
       REDROID_IMAGE="local/redroid-14-mtg:2026.08.19"
       IMAGE_HAS_GMS="1"
       GAPPS_FLAVOR="mindthegapps"
       ;;
-    redroid-android15)
+    redroid-api35)
       ANDROID_VERSION="15"
       SDK_VERSION="35"
       REDROID_IMAGE="local/redroid-15-gms:2026.08.19"
@@ -268,13 +268,13 @@ select_release() {
       GAPPS_FLAVOR="litegapps"
       ;;
     redroid-android7|redroid-android70)
-      die "Android 7 没有官方 Redroid 镜像；当前最早支持 redroid-android81"
+      die "Android 7 没有官方 Redroid 镜像；当前最早支持 redroid-api27"
       ;;
     redroid-android16)
       die "redroid-android16 暂不支持：官方 x86_64 镜像在无 GPU 主机上会因 SurfaceFlinger 软件渲染缺陷无法完成启动"
       ;;
     *)
-      die "不支持容器名 $REDROID_CONTAINER；可选：redroid-android81、redroid-android11、redroid-android12、redroid-android13、redroid-android14、redroid-android15"
+      die "不支持容器名 $REDROID_CONTAINER；可选：redroid-api27、redroid-api30、redroid-api31、redroid-api33、redroid-api34、redroid-api35"
       ;;
   esac
 

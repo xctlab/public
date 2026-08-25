@@ -64,15 +64,15 @@ docker push registry.example.com/private/redroid-14-mtg:2026.08.19
 ## Deploy
 
 The deployment script accepts only one optional argument: the canonical Docker
-container name. `redroid-android14` selects Android 14 / API 34 and uses this
+container name. `redroid-api34` selects Android 14 / API 34 and uses this
 GMS image:
 
 ```bash
-sudo bash script/shell/deploy_redroid.sh redroid-android14
+sudo bash script/shell/deploy_redroid.sh redroid-api34
 ```
 
 If the local image is missing, the deployment script builds it automatically
-from this directory. The instance is named `redroid-android14`, stores data in
+from this directory. The instance is named `redroid-api34`, stores data in
 `/var/lib/redroid/instances/android14/data`, and binds ADB to
 `127.0.0.1:15534`.
 
@@ -83,19 +83,19 @@ directly without prompting:
 
 ```bash
 sudo bash script/shell/deploy_redroid.sh
-sudo bash script/shell/deploy_redroid.sh redroid-android15
+sudo bash script/shell/deploy_redroid.sh redroid-api35
 ```
 
 Current choices:
 
 | Android | API Level | Image type | Container | Local ADB |
 |---------|-----------|------------|-----------|-----------|
-| 8.1 | 27 | LiteGapps | `redroid-android81` | `127.0.0.1:15527` |
-| 11 | 30 | LiteGapps | `redroid-android11` | `127.0.0.1:15530` |
-| 12 | 31 | Official Redroid AOSP | `redroid-android12` | `127.0.0.1:15531` |
-| 13 | 33 | MindTheGapps archive | `redroid-android13` | `127.0.0.1:15533` |
-| 14 | 34 | MindTheGapps | `redroid-android14` | `127.0.0.1:15534` |
-| 15 | 35 | LiteGapps | `redroid-android15` | `127.0.0.1:15535` |
+| 8.1 | 27 | LiteGapps | `redroid-api27` | `127.0.0.1:15527` |
+| 11 | 30 | LiteGapps | `redroid-api30` | `127.0.0.1:15530` |
+| 12 | 31 | Official Redroid AOSP | `redroid-api31` | `127.0.0.1:15531` |
+| 13 | 33 | MindTheGapps archive | `redroid-api33` | `127.0.0.1:15533` |
+| 14 | 34 | MindTheGapps | `redroid-api34` | `127.0.0.1:15534` |
+| 15 | 35 | LiteGapps | `redroid-api35` | `127.0.0.1:15535` |
 
 Redroid does not publish an official Android 7 image; its earliest supported
 release here is Android 8.1 / API 27. Android 16 / API 36 is intentionally
@@ -108,8 +108,8 @@ ws-scrcpy device list. Re-running the script reuses a matching running instance
 without restarting it. It also refuses to replace an existing instance whose
 image, data directory, or port differs.
 
-The existing AOSP containers named `redroid-android81`, `redroid-android11`, or
-`redroid-android13` are therefore not silently replaced by the new GMS images;
+The existing AOSP containers named `redroid-api27`, `redroid-api30`, or
+`redroid-api33` are therefore not silently replaced by the new GMS images;
 stop and remove an old instance manually after backing up its `/data` volume
 before migrating that canonical name.
 
