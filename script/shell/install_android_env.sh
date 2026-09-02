@@ -54,6 +54,7 @@ fi
 # 添加环境变量到 ~/.bashrc 配置
 echo "🔧 Step 6: 配置环境变量..."
 ENV_CONFIG_FILE="$USER_HOME/.user_env"
+ENV_CONFIG_NAME="${ENV_CONFIG_FILE##*/}"
 if ! grep -q ANDROID_SDK_ROOT "$ENV_CONFIG_FILE"; then
   cat <<'EOF' >> "$ENV_CONFIG_FILE"
 
@@ -61,7 +62,8 @@ if ! grep -q ANDROID_SDK_ROOT "$ENV_CONFIG_FILE"; then
 export JAVA_HOME=/opt/android-studio/jbr
 export PATH=$JAVA_HOME/bin:$PATH
 
-export ANDROID_SDK_ROOT=$HOME/Android/Sdk
+export ANDROID_HOME=$HOME/Android/Sdk
+export ANDROID_SDK_ROOT=$ANDROID_HOME
 export PATH=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH
 export PATH=$ANDROID_SDK_ROOT/platform-tools:$PATH
 export PATH=$ANDROID_SDK_ROOT/emulator:$PATH
@@ -69,17 +71,41 @@ export PATH=$ANDROID_SDK_ROOT/emulator:$PATH
 EOF
   echo "✅ 已添加到 $ENV_CONFIG_FILE。"
 else
-  echo "⚠️ 已检测到 $ENV_CONFIG_FILE 存在 SDK 环境变量配置，未重复添加。"
+  if ! grep -q ANDROID_HOME "$ENV_CONFIG_FILE"; then
+    sed -i '/export ANDROID_SDK_ROOT=/i export ANDROID_HOME=$HOME/Android/Sdk' "$ENV_CONFIG_FILE"
+    sed -i 's|export ANDROID_SDK_ROOT=.*|export ANDROID_SDK_ROOT=$ANDROID_HOME|' "$ENV_CONFIG_FILE"
+  fi
+  echo "⚠️ 已检测到 $ENV_CONFIG_FILE 存在 SDK 环境变量配置，已补齐兼容变量。"
+fi
+if grep -q '^export BASH_ENV=' "$ENV_CONFIG_FILE"; then
+  sed -i "s|^export BASH_ENV=.*|export BASH_ENV=\"$ENV_CONFIG_FILE\"|" "$ENV_CONFIG_FILE"
+else
+  echo "export BASH_ENV=\"$ENV_CONFIG_FILE\"" >> "$ENV_CONFIG_FILE"
+fi
+
+# 配置同步到 ~/.bash_profile；bash -lc 会优先读取它而不是 ~/.profile。
+BASH_PROFILE_FILE="$USER_HOME/.bash_profile"
+if ! grep -Fq "$ENV_CONFIG_NAME" "$BASH_PROFILE_FILE" 2>/dev/null; then
+  cat <<EOF >> "$BASH_PROFILE_FILE"
+
+# include .user_env if it exists
+if [ -f "$ENV_CONFIG_FILE" ]; then
+  . "$ENV_CONFIG_FILE"
+fi
+EOF
+  echo "✅ 已同步到 $BASH_PROFILE_FILE。"
+else
+  echo "⚠️ 检测到 $BASH_PROFILE_FILE 已配置，未重复添加。"
 fi
 
 # 配置同步到 ~/.profile,
 PROFILE_FILE="$USER_HOME/.profile"
-if ! grep -q ".user_env" "$PROFILE_FILE"; then
-  cat <<'EOF' >> "$PROFILE_FILE"
+if ! grep -Fq "$ENV_CONFIG_NAME" "$PROFILE_FILE"; then
+  cat <<EOF >> "$PROFILE_FILE"
 
 # include .user_env if it exists
-if [ -f "$HOME/.user_env" ]; then
-  . "$HOME/.user_env"
+if [ -f "$ENV_CONFIG_FILE" ]; then
+  . "$ENV_CONFIG_FILE"
 fi
 EOF
   echo "✅ 已同步到 $PROFILE_FILE。"
@@ -87,16 +113,21 @@ else
   echo "⚠️ 检测到 $PROFILE_FILE 已配置 ，未重复添加。"
 fi
 
-# 配置同步到 ~/.bashrc,
+# 配置同步到 ~/.bashrc。放在文件开头，避免非交互 shell 提前 return。
 BASHRC_FILE="$USER_HOME/.bashrc"
-if ! grep -q ".user_env" "$BASHRC_FILE"; then
-  cat <<'EOF' >> "$BASHRC_FILE"
-
+if [ ! -f "$BASHRC_FILE" ] || [ "$(grep -Fn -m1 "$ENV_CONFIG_NAME" "$BASHRC_FILE" | cut -d: -f1)" != "1" ]; then
+  BASHRC_TMP=$(mktemp)
+  cat <<EOF > "$BASHRC_TMP"
 # include .user_env if it exists
-if [ -f "$HOME/.user_env" ]; then
-  . "$HOME/.user_env"
+if [ -f "$ENV_CONFIG_FILE" ]; then
+  . "$ENV_CONFIG_FILE"
 fi
 EOF
+  if [ -f "$BASHRC_FILE" ]; then
+    sed '/^# include \.user_env if it exists$/,/^fi$/d' "$BASHRC_FILE" >> "$BASHRC_TMP"
+  fi
+  cat "$BASHRC_TMP" > "$BASHRC_FILE"
+  rm "$BASHRC_TMP"
   echo "✅ 已同步到 $BASHRC_FILE"
 else
   echo "⚠️ 检测到 $BASHRC_FILE 已配置 ，未重复添加。"
@@ -106,7 +137,8 @@ fi
 export JAVA_HOME=/opt/android-studio/jbr
 export PATH=$JAVA_HOME/bin:$PATH
 
-export ANDROID_SDK_ROOT="$USER_HOME/Android/Sdk"
+export ANDROID_HOME="$USER_HOME/Android/Sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
 export PATH="$ANDROID_SDK_ROOT/platform-tools:$PATH"
 export PATH="$ANDROID_SDK_ROOT/emulator:$PATH"
